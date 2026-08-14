@@ -7,9 +7,11 @@
 
 #include <mgba/core/interface.h>
 #include <mgba/gba/interface.h>
+#include <mgba/internal/gba/sio/netlink.h>
 
 #include <array>
 #include <ctime>
+#include <memory>
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -64,6 +66,14 @@ public:
     void SetAudioOutputSpeed(float speed) override;
     void FlushAudioOutput() override;
 
+    // Network Link methods must be called on the game thread that owns RunFrame().
+    bool StartNetlinkHost(int port);
+    bool StartNetlinkJoin(const std::string& host, int port);
+    void DisconnectNetlink();
+    bool HasNetlink() const { return static_cast<bool>(m_netlink); }
+    GBASIONetlinkConnectionState GetNetlinkState() const;
+    std::string GetNetlinkError() const;
+
 private:
     static constexpr double kDefaultSampleRate = 48000.0;
     static constexpr size_t kSwitchAudioSamples = 0x400;
@@ -89,6 +99,7 @@ private:
     void drainMgbaAudio();
     void captureVideoFrame();
     void updateKeys();
+    bool attachNetlink(std::unique_ptr<GBASIONetlink> netlink);
     void releaseCore();
     std::string saveFilePath() const;
     void configureAudioStream();
@@ -124,6 +135,8 @@ private:
     bool m_fallbackCheatAttached = false;
     int m_fallbackCheatPlatform = -1;
     bool m_fastForwarding = false;
+    std::unique_ptr<GBASIONetlink> m_netlink;
+    std::string m_netlinkError;
 
     unsigned m_width = 0;
     unsigned m_height = 0;

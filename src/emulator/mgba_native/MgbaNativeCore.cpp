@@ -13,6 +13,7 @@
 #include <mgba/gb/interface.h>
 #include <mgba/internal/gba/audio.h>
 #include <mgba/internal/gba/cheats.h>
+#include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gb/cheats.h>
 #include <mgba/internal/gb/overrides.h>
 #include <mgba/internal/sm83/sm83.h>
@@ -396,6 +397,107 @@ void MgbaNativeCore::Reset()
             m_core->reloadConfigOption(m_core, "volume", &m_core->config);
         }
     }
+}
+
+bool MgbaNativeCore::StartNetlinkHost(int port)
+{
+    m_netlinkError.clear();
+    if (!m_ready || !m_core || m_core->platform(m_core) != mPLATFORM_GBA)
+    {
+        m_netlinkError = "Load a GBA game before starting Network Link.";
+        return false;
+    }
+    if (m_netlink)
+    {
+        m_netlinkError = "Network Link is already active.";
+        return false;
+    }
+    if (port <= 0 || port > 65535)
+    {
+        m_netlinkError = "Network Link port is out of range.";
+        return false;
+    }
+
+    auto netlink = std::make_unique<GBASIONetlink>();
+    GBASIONetlinkCreate(netlink.get());
+    if (!GBASIONetlinkHost(netlink.get(), port))
+    {
+        m_netlinkError = GBASIONetlinkGetError(netlink.get());
+        GBASIONetlinkDestroy(netlink.get());
+        return false;
+    }
+    return attachNetlink(std::move(netlink));
+}
+
+bool MgbaNativeCore::StartNetlinkJoin(const std::string& host, int port)
+{
+    m_netlinkError.clear();
+    if (!m_ready || !m_core || m_core->platform(m_core) != mPLATFORM_GBA)
+    {
+        m_netlinkError = "Load a GBA game before starting Network Link.";
+        return false;
+    }
+    if (m_netlink)
+    {
+        m_netlinkError = "Network Link is already active.";
+        return false;
+    }
+    if (host.empty())
+    {
+        m_netlinkError = "Network Link host is empty.";
+        return false;
+    }
+    if (port <= 0 || port > 65535)
+    {
+        m_netlinkError = "Network Link port is out of range.";
+        return false;
+    }
+
+    auto netlink = std::make_unique<GBASIONetlink>();
+    GBASIONetlinkCreate(netlink.get());
+    if (!GBASIONetlinkJoin(netlink.get(), host.c_str(), port))
+    {
+        m_netlinkError = GBASIONetlinkGetError(netlink.get());
+        GBASIONetlinkDestroy(netlink.get());
+        return false;
+    }
+    return attachNetlink(std::move(netlink));
+}
+
+void MgbaNativeCore::DisconnectNetlink()
+{
+    if (!m_netlink)
+        return;
+
+    if (m_core && m_core->platform(m_core) == mPLATFORM_GBA)
+    {
+        auto* gba = static_cast<GBA*>(m_core->board);
+        if (gba)
+        {
+            GBASIOSetDriver(&gba->sio, nullptr, SIO_MULTI);
+            GBASIOSetRCNTDriver(&gba->sio, nullptr);
+        }
+    }
+
+    GBASIONetlinkDestroy(m_netlink.get());
+    m_netlink.reset();
+    m_netlinkError.clear();
+    brls::Logger::info("MgbaNativeCore: Network Link disconnected");
+}
+
+GBASIONetlinkConnectionState MgbaNativeCore::GetNetlinkState() const
+{
+    return m_netlink ? GBASIONetlinkGetState(m_netlink.get()) : GBA_NETLINK_DISCONNECTED;
+}
+
+std::string MgbaNativeCore::GetNetlinkError() const
+{
+    if (!m_netlinkError.empty())
+        return m_netlinkError;
+    if (!m_netlink)
+        return {};
+    const char* error = GBASIONetlinkGetError(m_netlink.get());
+    return error ? error : "";
 }
 
 bool MgbaNativeCore::Serialize(std::vector<uint8_t>& outBuf) const
@@ -1593,8 +1695,36 @@ void MgbaNativeCore::updateKeys()
     }
 }
 
+bool MgbaNativeCore::attachNetlink(std::unique_ptr<GBASIONetlink> netlink)
+{
+    if (!netlink || !m_core || m_core->platform(m_core) != mPLATFORM_GBA)
+    {
+        if (netlink)
+            GBASIONetlinkDestroy(netlink.get());
+        m_netlinkError = "Network Link requires an initialized GBA core.";
+        return false;
+    }
+
+    auto* gba = static_cast<GBA*>(m_core->board);
+    if (!gba)
+    {
+        GBASIONetlinkDestroy(netlink.get());
+        m_netlinkError = "GBA board is unavailable.";
+        return false;
+    }
+
+    m_netlink = std::move(netlink);
+    GBASIOSetDriver(&gba->sio, nullptr, SIO_NORMAL_32);
+    GBASIOSetRCNTDriver(&gba->sio, &m_netlink->rcnt.d);
+    GBASIOSetDriver(&gba->sio, &m_netlink->d, SIO_MULTI);
+    brls::Logger::info("MgbaNativeCore: Network Link attached");
+    return true;
+}
+
 void MgbaNativeCore::releaseCore()
 {
+    DisconnectNetlink();
+
     {
         std::lock_guard<std::mutex> lock(m_audioMutex);
         m_audioBuffer.clear();
