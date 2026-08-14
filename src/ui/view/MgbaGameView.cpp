@@ -39,6 +39,7 @@
 namespace
 {
     constexpr auto kPlayTimeCheckpointInterval = std::chrono::seconds(60);
+    constexpr int kNetlinkPort = 8765;
 
     constexpr int kNdsTargetLatencyFloorMs = 120;
     constexpr int kNdsMaxLatencyFloorMs = 240;
@@ -94,6 +95,22 @@ namespace
         case GBA_NETLINK_ERROR: return State::Error;
         case GBA_NETLINK_DISCONNECTED:
         default: return State::Disconnected;
+        }
+    }
+
+    std::string netlinkStatusText(const beiklive::GameSignal::NetlinkStatus& status)
+    {
+        using State = beiklive::GameSignal::NetlinkState;
+        switch (status.state)
+        {
+        case State::Listening: return L("等待另一台 Switch 加入");
+        case State::Connecting: return L("正在连接");
+        case State::Handshake: return L("正在握手");
+        case State::Ready: return L("已连接");
+        case State::Error:
+            return status.error.empty() ? L("连接错误") : L("错误：") + status.error;
+        case State::Disconnected:
+        default: return L("未连接");
         }
     }
 
@@ -154,8 +171,69 @@ namespace beiklive
     void MgbaGameView::setGameMenuView(GameMenuView* menuView)
     {
         m_gameMenuView = menuView;
-        if (!m_gameMenuView ||
-            m_gameEntry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuGB))
+        if (!m_gameMenuView)
+            return;
+
+        if (m_gameEntry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA))
+        {
+            auto* header = new brls::Header();
+            header->setTitle(L("GBA 联机"));
+            m_gameMenuView->addCoreDisplaySettingView(header);
+
+            m_netlinkStatusCell = new beiklive::DetailCell();
+            m_netlinkStatusCell->setLeftText(L("连接状态"));
+            m_netlinkStatusCell->setRightText(L("未连接"));
+            m_netlinkStatusCell->setFocusable(false);
+            m_gameMenuView->addCoreDisplaySettingView(m_netlinkStatusCell);
+
+            auto* hostCell = new beiklive::DetailCell();
+            hostCell->setLeftText(L("Host（端口 8765）"));
+            hostCell->setRightText(L("开始监听"));
+            hostCell->registerClickAction([this](brls::View*) -> bool {
+                requestNetlinkHost(kNetlinkPort);
+                brls::Application::notify(L("正在端口 8765 等待连接"));
+                return true;
+            });
+            m_gameMenuView->addCoreDisplaySettingView(hostCell);
+
+            auto* joinCell = new beiklive::DetailCell();
+            joinCell->setLeftText(L("Join"));
+            joinCell->setRightText(L("输入 Host 地址"));
+            joinCell->registerClickAction([this](brls::View*) -> bool {
+                auto* ime = brls::Application::getImeManager();
+                if (!ime)
+                    return true;
+                ime->openForText(
+                    [this](std::string host) {
+                        host.erase(0, host.find_first_not_of(" \t\r\n"));
+                        const auto end = host.find_last_not_of(" \t\r\n");
+                        if (end == std::string::npos)
+                            return;
+                        host.erase(end + 1);
+                        requestNetlinkJoin(host, kNetlinkPort);
+                        brls::Application::notify(L("正在连接 ") + host + ":8765");
+                    },
+                    L("输入 Host 的 IP 地址"),
+                    L("两台 Switch 需连接同一 Wi-Fi"),
+                    255,
+                    "",
+                    brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_NONE);
+                return true;
+            });
+            m_gameMenuView->addCoreDisplaySettingView(joinCell);
+
+            auto* disconnectCell = new beiklive::DetailCell();
+            disconnectCell->setLeftText(L("Disconnect"));
+            disconnectCell->setRightText(L("断开连接"));
+            disconnectCell->registerClickAction([this](brls::View*) -> bool {
+                requestNetlinkDisconnect();
+                brls::Application::notify(L("已请求断开 GBA 联机"));
+                return true;
+            });
+            m_gameMenuView->addCoreDisplaySettingView(disconnectCell);
+        }
+
+        if (m_gameEntry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuGB))
             return;
 
         auto *header = new brls::Header();
@@ -437,6 +515,16 @@ namespace beiklive
                         brls::Style style, brls::FrameContext *ctx)
     {
         Box::draw(vg, x, y, width, height, style, ctx);
+
+        if (m_netlinkStatusCell)
+        {
+            const auto status = getNetlinkStatus();
+            if (status.state != m_lastNetlinkStatus.state || status.error != m_lastNetlinkStatus.error)
+            {
+                m_lastNetlinkStatus = status;
+                m_netlinkStatusCell->setRightText(netlinkStatusText(status));
+            }
+        }
 
         GameInputManager::instance().setActivePlatform(m_gameEntry.platform);
         GameInputManager::instance().handleInput(); // 每帧获取输入

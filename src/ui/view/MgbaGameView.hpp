@@ -30,6 +30,7 @@ namespace beiklive
     class GameMenuView;         // 前置声明
     class RewindSelectorView;   // 前置声明
     class IEmulatorAudioOutput;
+    class DetailCell;
 
     // mGBA 游戏视图，负责 GBA/GBC/GB 的 native mGBA 运行、渲染、音频和输入
     class MgbaGameView : public GameViewBase
@@ -134,6 +135,8 @@ namespace beiklive
             // ---- libretro 核心 -----------------------------------------------
             IEmulatorCore* m_core = nullptr;
             IEmulatorAudioOutput* m_coreAudioOutput = nullptr; ///< mGBA/Switch 原生音频直出缓存指针
+            DetailCell* m_netlinkStatusCell = nullptr;
+            GameSignal::NetlinkStatus m_lastNetlinkStatus;
 
             // ---- 渲染器 -------------------------------------------------------
             beiklive::GameRenderer m_renderer; ///< 游戏帧渲染器（GL 纹理 + 直接绘制）
