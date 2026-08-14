@@ -3,6 +3,7 @@
 #include "GameMenuView.hpp"
 #include "RewindSelectorView.hpp"
 #include "emulator/IEmulatorAudioOutput.hpp"
+#include "emulator/mgba_native/MgbaNativeCore.hpp"
 #include "game/PlayTimeCheckpointWriter.hpp"
 #include "game/audio/AudioManager.hpp"
 #include "game/control/InputMappingDefaults.hpp"
@@ -79,6 +80,21 @@ namespace
     bool shouldSetupCoreOnGameThread(int platform)
     {
         return isNdsPlatform(platform) || isMgbaNativePlatform(platform);
+    }
+
+    beiklive::GameSignal::NetlinkState mapNetlinkState(GBASIONetlinkConnectionState state)
+    {
+        using State = beiklive::GameSignal::NetlinkState;
+        switch (state)
+        {
+        case GBA_NETLINK_LISTENING: return State::Listening;
+        case GBA_NETLINK_CONNECTING: return State::Connecting;
+        case GBA_NETLINK_HANDSHAKE: return State::Handshake;
+        case GBA_NETLINK_READY: return State::Ready;
+        case GBA_NETLINK_ERROR: return State::Error;
+        case GBA_NETLINK_DISCONNECTED:
+        default: return State::Disconnected;
+        }
     }
 
     std::pair<unsigned, unsigned> rewindThumbSizeForFrame(unsigned srcW, unsigned srcH)
@@ -2681,6 +2697,50 @@ namespace beiklive
             }
         };
 
+        auto processNetlinkSignals = [this](GameSignal& sig) {
+            auto request = sig.consumeNetlinkRequest();
+            auto* nativeCore = dynamic_cast<beiklive::mgba_native::MgbaNativeCore*>(m_core);
+
+            if (!nativeCore)
+            {
+                if (request.pending)
+                    sig.publishNetlinkStatus(GameSignal::NetlinkState::Error,
+                                             "Network Link requires the native mGBA core.");
+                return;
+            }
+
+            if (request.pending)
+            {
+                bool ok = true;
+                switch (request.action)
+                {
+                case GameSignal::NetlinkAction::Host:
+                    ok = nativeCore->StartNetlinkHost(request.port);
+                    break;
+                case GameSignal::NetlinkAction::Join:
+                    ok = nativeCore->StartNetlinkJoin(request.host, request.port);
+                    break;
+                case GameSignal::NetlinkAction::Disconnect:
+                    nativeCore->DisconnectNetlink();
+                    break;
+                case GameSignal::NetlinkAction::None:
+                    break;
+                }
+                if (!ok)
+                {
+                    sig.publishNetlinkStatus(GameSignal::NetlinkState::Error,
+                                             nativeCore->GetNetlinkError());
+                    return;
+                }
+            }
+
+            std::string error = nativeCore->GetNetlinkError();
+            auto state = mapNetlinkState(nativeCore->GetNetlinkState());
+            if (!nativeCore->HasNetlink() && !error.empty())
+                state = GameSignal::NetlinkState::Error;
+            sig.publishNetlinkStatus(state, std::move(error));
+        };
+
 
         while (m_running.load(std::memory_order_acquire))
         {
@@ -2688,6 +2748,9 @@ namespace beiklive
             _updateSwitchFocusState();
 #endif
             auto& sig = GameSignal::instance();
+
+            // UI 只投递请求；mGBA 驱动的安装、状态读取和销毁均在游戏线程执行。
+            processNetlinkSignals(sig);
 
             // ---- 自动加载即时存档 ----
             if (!sig.isPaused() && !autoLoadDone && autoLoadSlot > 0 && m_core && m_core->IsReady()) {
@@ -2946,6 +3009,7 @@ namespace beiklive
         }
 
         // ---- 提交时长记录 ----
+        GameSignal::instance().publishNetlinkStatus(GameSignal::NetlinkState::Disconnected);
         _saveAndCommitPlayTime();
 
         // ---- 强制保存 SRAM ----
@@ -3315,6 +3379,26 @@ namespace beiklive
         brls::Logger::info("MgbaGameView: queue cheat list entries={} enabled={}",
                            cheats.size(), enabled);
         GameSignal::instance().requestApplyCheats(cheats);
+    }
+
+    void MgbaGameView::requestNetlinkHost(int port)
+    {
+        GameSignal::instance().requestNetlinkHost(port);
+    }
+
+    void MgbaGameView::requestNetlinkJoin(const std::string& host, int port)
+    {
+        GameSignal::instance().requestNetlinkJoin(host, port);
+    }
+
+    void MgbaGameView::requestNetlinkDisconnect()
+    {
+        GameSignal::instance().requestNetlinkDisconnect();
+    }
+
+    GameSignal::NetlinkStatus MgbaGameView::getNetlinkStatus() const
+    {
+        return GameSignal::instance().getNetlinkStatus();
     }
 
     void MgbaGameView::_onShaderToggle(bool on)

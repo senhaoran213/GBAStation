@@ -82,6 +82,12 @@ namespace beiklive
             void requestCheatPathUpdate(const std::string& path);
             void applyCheatsUpdate(const std::vector<CheatEntry>& cheats);
 
+            /// 请求游戏线程管理 mGBA Network Link。
+            void requestNetlinkHost(int port);
+            void requestNetlinkJoin(const std::string& host, int port);
+            void requestNetlinkDisconnect();
+            GameSignal::NetlinkStatus getNetlinkStatus() const;
+
             /// 着色器开关（UI线程调用）
             void _onShaderToggle(bool on);
             /// 着色器路径变更（UI线程调用）
