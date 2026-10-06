@@ -44,8 +44,9 @@ export TMPDIR="$BUILD_DIR/.tmp"
 export TMP="$TMPDIR"
 export TEMP="$TMPDIR"
 
-# Make configure script executable
-chmod +x "$BUILD_DIR/configure"
+# Some vendor archives lose executable bits on checkout. FFmpeg invokes both
+# scripts directly during configuration and archive generation.
+chmod +x "$BUILD_DIR/configure" "$BUILD_DIR"/ffbuild/*.sh
 
 OPTIONS=(
     "--cc=$CC" "--ar=$AR" "--ranlib=$RANLIB"

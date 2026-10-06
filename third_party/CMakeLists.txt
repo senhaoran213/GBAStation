@@ -93,14 +93,15 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(ffmpeg_minimal DEPENDS ${FFMPEG_STATIC_LIBRARIES})
+file(MAKE_DIRECTORY ${FFMPEG_BUILD_DIR})
 
 function(add_ffmpeg_static_library TARGET_NAME LIBRARY_PATH)
     add_library(${TARGET_NAME} STATIC IMPORTED GLOBAL)
     set_target_properties(${TARGET_NAME} PROPERTIES
         IMPORTED_LOCATION ${LIBRARY_PATH}
-        # Public FFmpeg headers are source files.  Generated configuration
-        # headers are consumed only while building the isolated static libs.
-        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_SOURCE_DIR}"
+        # Public headers include generated libavutil/avconfig.h. Prefer the
+        # isolated build copy so both headers and configuration match the libs.
+        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_BUILD_DIR};${FFMPEG_SOURCE_DIR}"
     )
     add_dependencies(${TARGET_NAME} ffmpeg_minimal)
 endfunction()
