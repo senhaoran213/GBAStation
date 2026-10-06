@@ -467,7 +467,10 @@ bool MgbaNativeCore::StartNetlinkJoin(const std::string& host, int port)
 void MgbaNativeCore::DisconnectNetlink()
 {
     if (!m_netlink)
+    {
+        m_netlinkError.clear();
         return;
+    }
 
     if (m_core && m_core->platform(m_core) == mPLATFORM_GBA)
     {

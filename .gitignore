@@ -56,3 +56,6 @@ third_party/FFmpeg/libav*/lib*.version
 
 AGENTS.md
 .DS_Store
+
+# Local Network Link diagnostics
+/netlink-traces/
