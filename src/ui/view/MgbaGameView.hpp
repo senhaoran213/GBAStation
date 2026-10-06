@@ -135,6 +135,7 @@ namespace beiklive
             // ---- libretro 核心 -----------------------------------------------
             IEmulatorCore* m_core = nullptr;
             IEmulatorAudioOutput* m_coreAudioOutput = nullptr; ///< mGBA/Switch 原生音频直出缓存指针
+            std::atomic<bool> m_netlinkMenuVisible{false};
             DetailCell* m_netlinkStatusCell = nullptr;
             GameSignal::NetlinkStatus m_lastNetlinkStatus;
 

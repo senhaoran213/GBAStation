@@ -103,12 +103,25 @@ namespace
         using State = beiklive::GameSignal::NetlinkState;
         switch (status.state)
         {
-        case State::Listening: return L("等待另一台 Switch 加入");
+        case State::Listening: return L("等待对方设备连接（端口 8765）");
         case State::Connecting: return L("正在连接");
         case State::Handshake: return L("正在握手");
         case State::Ready: return L("已连接");
         case State::Error:
-            return status.error.empty() ? L("连接错误") : L("错误：") + status.error;
+            if (status.error == "could not listen on TCP port")
+                return L("监听失败：端口 8765 不可用");
+            if (status.error == "could not resolve host")
+                return L("连接失败：主机地址无效");
+            if (status.error == "peer disconnected" || status.error == "peer requested close")
+                return L("对方已断开；请先断开再重连");
+            if (status.error == "protocol mismatch")
+                return L("协议不兼容；请检查两端版本");
+            if (status.error == "Network Link is already active.")
+                return L("联机已启动；请先断开再重连");
+            if (status.error == "Load a GBA game before starting Network Link.")
+                return L("请先加载 GBA 游戏");
+            return status.error.empty() ? L("连接错误；请先断开再重连")
+                                        : L("连接错误；请断开后重试（") + status.error + L("）");
         case State::Disconnected:
         default: return L("未连接");
         }
@@ -178,28 +191,43 @@ namespace beiklive
         {
             auto* header = new brls::Header();
             header->setTitle(L("GBA 联机"));
-            m_gameMenuView->addCoreDisplaySettingView(header);
+            m_gameMenuView->addCoreNetlinkSettingView(header);
 
             m_netlinkStatusCell = new beiklive::DetailCell();
             m_netlinkStatusCell->setLeftText(L("连接状态"));
             m_netlinkStatusCell->setRightText(L("未连接"));
-            m_netlinkStatusCell->setFocusable(false);
-            m_gameMenuView->addCoreDisplaySettingView(m_netlinkStatusCell);
-
-            auto* hostCell = new beiklive::DetailCell();
-            hostCell->setLeftText(L("Host（端口 8765）"));
-            hostCell->setRightText(L("开始监听"));
-            hostCell->registerClickAction([this](brls::View*) -> bool {
-                requestNetlinkHost(kNetlinkPort);
-                brls::Application::notify(L("正在端口 8765 等待连接"));
+            m_netlinkStatusCell->registerClickAction([this](brls::View*) -> bool {
+                auto* dialog = new brls::Dialog(netlinkStatusText(getNetlinkStatus()));
+                dialog->addButton(L("确定"), []() {});
+                dialog->open();
                 return true;
             });
-            m_gameMenuView->addCoreDisplaySettingView(hostCell);
+            m_gameMenuView->addCoreNetlinkSettingView(m_netlinkStatusCell);
+
+            auto* hostCell = new beiklive::DetailCell();
+            hostCell->setLeftText(L("作为主机（端口 8765）"));
+            hostCell->setRightText(L("开始监听"));
+            hostCell->registerClickAction([this](brls::View*) -> bool {
+                if (getNetlinkStatus().state != GameSignal::NetlinkState::Disconnected)
+                {
+                    brls::Application::notify(L("联机已启动或出错；请先断开再重连"));
+                    return true;
+                }
+                requestNetlinkHost(kNetlinkPort);
+                brls::Application::notify(L("已请求监听端口 8765；请查看连接状态"));
+                return true;
+            });
+            m_gameMenuView->addCoreNetlinkSettingView(hostCell);
 
             auto* joinCell = new beiklive::DetailCell();
-            joinCell->setLeftText(L("Join"));
-            joinCell->setRightText(L("输入 Host 地址"));
+            joinCell->setLeftText(L("加入主机"));
+            joinCell->setRightText(L("输入主机 IP 地址"));
             joinCell->registerClickAction([this](brls::View*) -> bool {
+                if (getNetlinkStatus().state != GameSignal::NetlinkState::Disconnected)
+                {
+                    brls::Application::notify(L("联机已启动或出错；请先断开再重连"));
+                    return true;
+                }
                 auto* ime = brls::Application::getImeManager();
                 if (!ime)
                     return true;
@@ -208,29 +236,32 @@ namespace beiklive
                         host.erase(0, host.find_first_not_of(" \t\r\n"));
                         const auto end = host.find_last_not_of(" \t\r\n");
                         if (end == std::string::npos)
+                        {
+                            brls::Application::notify(L("请输入主机 IP 地址"));
                             return;
+                        }
                         host.erase(end + 1);
                         requestNetlinkJoin(host, kNetlinkPort);
-                        brls::Application::notify(L("正在连接 ") + host + ":8765");
+                        brls::Application::notify(L("已请求连接 ") + host + ":8765；请查看连接状态");
                     },
-                    L("输入 Host 的 IP 地址"),
-                    L("两台 Switch 需连接同一 Wi-Fi"),
+                    L("输入主机的 IP 地址"),
+                    L("两台设备需连接同一局域网"),
                     255,
                     "",
                     brls::KeyboardKeyDisableBitmask::KEYBOARD_DISABLE_NONE);
                 return true;
             });
-            m_gameMenuView->addCoreDisplaySettingView(joinCell);
+            m_gameMenuView->addCoreNetlinkSettingView(joinCell);
 
             auto* disconnectCell = new beiklive::DetailCell();
-            disconnectCell->setLeftText(L("Disconnect"));
+            disconnectCell->setLeftText(L("断开联机"));
             disconnectCell->setRightText(L("断开连接"));
             disconnectCell->registerClickAction([this](brls::View*) -> bool {
                 requestNetlinkDisconnect();
-                brls::Application::notify(L("已请求断开 GBA 联机"));
+                brls::Application::notify(L("已请求断开；请查看连接状态"));
                 return true;
             });
-            m_gameMenuView->addCoreDisplaySettingView(disconnectCell);
+            m_gameMenuView->addCoreNetlinkSettingView(disconnectCell);
         }
 
         if (m_gameEntry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuGB))
@@ -420,6 +451,7 @@ namespace beiklive
 
     void MgbaGameView::onFocusGained()
     {
+        m_netlinkMenuVisible.store(false, std::memory_order_release);
         Box::onFocusGained();
         brls::Logger::debug("MgbaGameView gained focus");
 
@@ -521,6 +553,14 @@ namespace beiklive
             const auto status = getNetlinkStatus();
             if (status.state != m_lastNetlinkStatus.state || status.error != m_lastNetlinkStatus.error)
             {
+                using State = GameSignal::NetlinkState;
+                if (status.state == State::Ready && m_lastNetlinkStatus.state != State::Ready)
+                    brls::Application::notify(L("GBA 联机已连接"));
+                else if (status.state == State::Error)
+                    brls::Application::notify(netlinkStatusText(status));
+                else if (status.state == State::Disconnected &&
+                         m_lastNetlinkStatus.state != State::Disconnected)
+                    brls::Application::notify(L("GBA 联机已断开"));
                 m_lastNetlinkStatus = status;
                 m_netlinkStatusCell->setRightText(netlinkStatusText(status));
             }
@@ -545,6 +585,7 @@ namespace beiklive
 
         // 消费打开菜单信号：异步触发菜单入场，本帧仍继续渲染避免闪烁
         if (GameSignal::instance().consumeOpenMenu()) {
+            m_netlinkMenuVisible.store(true, std::memory_order_release);
             GameSignal::instance().requestPause(true);
             if (m_gameMenuView) {
                 brls::sync([this](){
@@ -2877,6 +2918,19 @@ namespace beiklive
                 }
                 if (!hasAnyFrame)
                     _captureVideoFrame();
+                // 联机菜单保持握手驱动；连接成功后立即恢复暂停状态。
+                // 只在前台菜单执行，系统退到后台时仍保持真正暂停。
+                if (m_netlinkMenuVisible.load(std::memory_order_acquire) && !m_switchBackgroundPaused)
+                {
+                    auto* native = dynamic_cast<beiklive::mgba_native::MgbaNativeCore*>(m_core);
+                    if (native && native->HasNetlink() &&
+                        native->GetNetlinkState() != GBA_NETLINK_READY &&
+                        native->GetNetlinkState() != GBA_NETLINK_ERROR)
+                    {
+                        m_core->RunFrame();
+                        processNetlinkSignals(sig);
+                    }
+                }
                 // 暂停菜单中切换/编辑金手指时，也要及时同步到核心。
                 processCheatSignals(sig, true);
                 // 暂停时允许截图，便于在菜单暂停后保存当前画面。
