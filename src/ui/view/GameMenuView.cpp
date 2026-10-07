@@ -431,6 +431,9 @@ namespace beiklive
     brls::View* GameMenuView::_createNetlinkPanel()
     {
         auto* scroll = beiklive::ui::makeScrollTab();
+        // ScrollingFrame detaches its content, so it cannot derive a width
+        // from the cells when TabFrame aligns panels to FLEX_START.
+        scroll->setWidthPercentage(100.f);
         auto* box = beiklive::ui::makeContentBox();
         m_coreNetlinkSettingsBox = new brls::Box(brls::Axis::COLUMN);
         box->addView(m_coreNetlinkSettingsBox);

@@ -318,7 +318,7 @@ public:
     // ---- mGBA Network Link --------------------------------------------
 
     enum class NetlinkAction { None, Host, Join, Disconnect };
-    enum class NetlinkState { Disconnected, Listening, Connecting, Handshake, Ready, Error };
+    enum class NetlinkState { Disconnected, Listening, Connecting, Handshake, Ready, Error, WaitingForResume };
 
     struct NetlinkReq {
         NetlinkAction action = NetlinkAction::None;
@@ -347,9 +347,14 @@ public:
         m_pendingNetlink = {NetlinkAction::Disconnect, {}, 0, true};
     }
 
-    NetlinkReq consumeNetlinkRequest() {
+    NetlinkReq consumeNetlinkRequest(bool allowStart = true) {
         std::lock_guard<std::mutex> lock(m_netlinkMutex);
         if (!m_pendingNetlink.pending)
+            return {};
+        // Keep Host/Join queued while the game is paused. Disconnect also
+        // cancels a queued start and must remain available inside the menu.
+        if (!allowStart && (m_pendingNetlink.action == NetlinkAction::Host ||
+                            m_pendingNetlink.action == NetlinkAction::Join))
             return {};
         NetlinkReq req = std::move(m_pendingNetlink);
         m_pendingNetlink = {};
@@ -364,6 +369,10 @@ public:
 
     NetlinkStatus getNetlinkStatus() const {
         std::lock_guard<std::mutex> lock(m_netlinkMutex);
+        if (m_pendingNetlink.pending &&
+            (m_pendingNetlink.action == NetlinkAction::Host ||
+             m_pendingNetlink.action == NetlinkAction::Join))
+            return {NetlinkState::WaitingForResume, {}};
         return m_netlinkStatus;
     }
 

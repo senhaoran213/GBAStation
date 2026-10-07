@@ -9,6 +9,8 @@
 #include <mgba/gba/interface.h>
 #include <mgba/internal/gba/sio/netlink.h>
 
+#include "netlink/ProductSession.hpp"
+
 #include <array>
 #include <ctime>
 #include <memory>
@@ -49,8 +51,8 @@ public:
     double Fps() const override { return m_fps; }
     double SampleRate() const override { return m_sampleRate; }
 
-    void SetFastForwarding(bool ff) override { m_fastForwarding = ff; }
-    void NotifyConfigUpdated() override { applyConfig(); }
+    void SetFastForwarding(bool ff) override { m_fastForwarding = m_dual ? false : ff; }
+    void NotifyConfigUpdated() override { if (!m_dual) applyConfig(); }
 
     void ApplyCheats(const std::vector<CheatEntry>& cheats) override;
     void ReloadCheats();
@@ -70,9 +72,12 @@ public:
     bool StartNetlinkHost(int port);
     bool StartNetlinkJoin(const std::string& host, int port);
     void DisconnectNetlink();
-    bool HasNetlink() const { return static_cast<bool>(m_netlink); }
+    bool HasNetlink() const { return static_cast<bool>(m_dual); }
     GBASIONetlinkConnectionState GetNetlinkState() const;
     std::string GetNetlinkError() const;
+    std::string GetNetlinkNotice() const;
+    void PollNetlink();
+    uint64_t NetlinkFrame() const {return m_dual ? m_dual->nextFrame() : 0;}
 
 private:
     static constexpr double kDefaultSampleRate = 48000.0;
@@ -99,7 +104,6 @@ private:
     void drainMgbaAudio();
     void captureVideoFrame();
     void updateKeys();
-    bool attachNetlink(std::unique_ptr<GBASIONetlink> netlink);
     void releaseCore();
     std::string saveFilePath() const;
     void configureAudioStream();
@@ -135,8 +139,9 @@ private:
     bool m_fallbackCheatAttached = false;
     int m_fallbackCheatPlatform = -1;
     bool m_fastForwarding = false;
-    std::unique_ptr<GBASIONetlink> m_netlink;
+    std::unique_ptr<netlink::ProductSession> m_dual;
     std::string m_netlinkError;
+    std::string m_netlinkNotice;
 
     unsigned m_width = 0;
     unsigned m_height = 0;
