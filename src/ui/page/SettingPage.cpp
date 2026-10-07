@@ -1,10 +1,12 @@
 #include "ui/page/SettingPage.hpp"
 #include "ui/page/FileListPage.hpp"
+#include "ui/widget/Header.hpp"
 #include "ui/utils/FilePickerHelper.hpp"
 #include "ui/utils/UiHelper.hpp"
 #include "ui/utils/AnimationHelper.hpp"
 #include "ui/utils/GradientFocus.hpp"
 #include "ui/utils/MaterialIcons.hpp"
+#include "ui/widget/VideoBackgroundView.hpp"
 
 #include <borealis/views/cells/cell_bool.hpp>
 #include <borealis/views/cells/cell_selector.hpp>
@@ -20,6 +22,7 @@
 #include "core/SteamGridDb.hpp"
 #include "core/ThreadPool.hpp"
 #include "core/constexpr.h"
+#include "game/audio/AudioManager.hpp"
 #include "game/control/InputMappingDefaults.hpp"
 #include "game/retro/LibretroLoader.hpp"
 
@@ -30,6 +33,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <sstream>
@@ -38,6 +42,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace beiklive
@@ -75,6 +80,23 @@ static std::string cfgGetStr(const std::string &key, const std::string &def)
 static void cfgSetStr(const std::string &key, const std::string &val)
 {
     SET_SETTING_KEY_STR(key, val);
+}
+
+static std::string pointerHotkeyHint(const char* key)
+{
+    if (std::strcmp(key, "hotkey.pointer_mode.pad") == 0)
+        return L("启用或关闭右摇杆控制的 NDS 触控指针");
+    if (std::strcmp(key, "hotkey.pointer_click.pad") == 0)
+        return L("按住时在指针当前位置触摸 NDS 下屏");
+    if (std::strcmp(key, "hotkey.swap_screens.pad") == 0)
+        return L("交换 NDS 上屏与下屏的显示位置");
+    if (std::strcmp(key, "hotkey.mic_input.pad") == 0)
+        return L("按住时向 NDS 模拟麦克风输入吹气白噪声（仅 DraStic 核心可用）");
+    if (std::strcmp(key, "hotkey.mic_toggle.pad") == 0)
+        return L("开关 NDS 麦克风输入（仅 DraStic 核心可用）");
+    if (std::strcmp(key, "hotkey.mic_source.pad") == 0)
+        return L("在模拟噪声与外接麦克风之间切换（仅 DraStic 核心可用）");
+    return L("可绑定单键或双键组合");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1261,6 +1283,7 @@ enum class NanoSettingKind
     Section,
     Toggle,
     Selector,
+    TextValue,
     Action,
     Platform,
     Binding,
@@ -1406,16 +1429,44 @@ public:
         setCustomNavigationRoute(brls::FocusDirection::RIGHT, this);
         _buildSettings();
 
-        auto up = [this](brls::View*) -> bool { _move(-1); return true; };
-        auto down = [this](brls::View*) -> bool { _move(1); return true; };
-        auto left = [this](brls::View*) -> bool { _adjust(-1); return true; };
-        auto right = [this](brls::View*) -> bool { _adjust(1); return true; };
-        auto previousCategory = [this](brls::View*) -> bool { _switchCategory(-1); return true; };
-        auto nextCategory = [this](brls::View*) -> bool { _switchCategory(1); return true; };
+        auto up = [this](brls::View*) -> bool {
+            _move(-2);
+            return true;
+        };
+        auto down = [this](brls::View*) -> bool {
+            _move(2);
+            return true;
+        };
+        auto left = [this](brls::View*) -> bool {
+            if (m_coreBrowserMode != CoreBrowserMode::None) _move(-1);
+            else _adjust(-1);
+            return true;
+        };
+        auto right = [this](brls::View*) -> bool {
+            if (m_coreBrowserMode != CoreBrowserMode::None) _move(1);
+            else _adjust(1);
+            return true;
+        };
+        auto previousCategory = [this](brls::View*) -> bool {
+            if (m_coreBrowserMode == CoreBrowserMode::Management && !m_coreSettingsOverlay) _adjust(-1);
+            else if (m_coreBrowserMode != CoreBrowserMode::None) return true;
+            else _switchCategory(-1);
+            return true;
+        };
+        auto nextCategory = [this](brls::View*) -> bool {
+            if (m_coreBrowserMode == CoreBrowserMode::Management && !m_coreSettingsOverlay) _adjust(1);
+            else if (m_coreBrowserMode != CoreBrowserMode::None) return true;
+            else _switchCategory(1);
+            return true;
+        };
         registerAction("", brls::BUTTON_NAV_UP, up, true, true, brls::SOUND_NONE);
         registerAction("", brls::BUTTON_NAV_DOWN, down, true, true, brls::SOUND_NONE);
         registerAction("", brls::BUTTON_NAV_LEFT, left, true, true, brls::SOUND_NONE);
         registerAction("", brls::BUTTON_NAV_RIGHT, right, true, true, brls::SOUND_NONE);
+        registerAction("", brls::BUTTON_UP, up, true, true, brls::SOUND_NONE);
+        registerAction("", brls::BUTTON_DOWN, down, true, true, brls::SOUND_NONE);
+        registerAction("", brls::BUTTON_LEFT, left, true, true, brls::SOUND_NONE);
+        registerAction("", brls::BUTTON_RIGHT, right, true, true, brls::SOUND_NONE);
         registerAction(L("上一类"), brls::BUTTON_LB, previousCategory, true, false, brls::SOUND_NONE);
         registerAction(L("下一类"), brls::BUTTON_RB, nextCategory, true, false, brls::SOUND_NONE);
         registerAction(L("选择"), brls::BUTTON_A, [this](brls::View*) -> bool {
@@ -1528,6 +1579,22 @@ private:
     float m_mappingTargetScroll = 0.f;
     bool m_inMapping = false;
     bool m_inCore = false;
+    bool m_coreSettingsOverlay = false;
+    enum class CoreBrowserMode { None, Management, Platform };
+    CoreBrowserMode m_coreBrowserMode = CoreBrowserMode::None;
+    CoreBrowserMode m_coreBrowserParent = CoreBrowserMode::None;
+    int m_coreBrowserFilter = 0;
+    int m_coreBrowserPlatform = -1;
+    std::vector<NanoSettingItem> m_coreBrowserItems;
+    std::vector<int> m_coreBrowserGroups;
+    std::vector<int> m_coreBrowserRows;
+    std::vector<int> m_coreBrowserColumns;
+    std::vector<float> m_coreBrowserCardOffsets;
+    float m_coreBrowserContentHeight = 0.f;
+    int m_coreBrowserFocus = 0;
+    float m_coreBrowserScroll = 0.f;
+    float m_coreBrowserTargetScroll = 0.f;
+    float m_coreBrowserViewport = 480.f;
     int m_coreFocus = 0;
     float m_coreScroll = 0.f;
     float m_coreTargetScroll = 0.f;
@@ -1647,56 +1714,46 @@ private:
         return item;
     }
 
+    NanoSettingItem _textValue(const std::string& title, const std::string& hint,
+                               char32_t icon, const std::string& configKey,
+                               const std::string& fallback, int maxLength = 24)
+    {
+        NanoSettingItem item;
+        item.kind = NanoSettingKind::TextValue;
+        item.title = title;
+        item.hint = hint;
+        item.icon = icon;
+        item.configKey = configKey;
+        item.value = [configKey, fallback]() { return cfgGetStr(configKey, fallback); };
+        item.activate = [this, title, hint, configKey, maxLength]() {
+            _openThreeDsTextInput(title, configKey, hint, maxLength);
+        };
+        item.reset = [configKey]() {
+            return beiklive::SettingManager
+                && beiklive::SettingManager->ResetToDefault(configKey)
+                && beiklive::SettingManager->Save();
+        };
+        return item;
+    }
+
     void _buildSettings()
     {
         using namespace beiklive::SettingKey;
         cfgSetBool("input.joystick.enabled", true);
         cfgSetBool("input.joystick.diagonal", true);
         auto& emulator = m_categories[0].items;
+        const int externalPlatforms[] = {6, 7, 9, 10, 11, 12, 13, 14};
+        const bool hasMissingExternalCore = std::any_of(
+            std::begin(externalPlatforms), std::end(externalPlatforms),
+            [](int platform) { return !beiklive::path::externalCoreInstalled(platform); });
+        if (hasMissingExternalCore)
+            emulator.push_back(_section(L("部分平台需要外置核心，请前往“关于 → 在线资源”下载")));
         emulator.push_back(_section(L("核心设置")));
-        auto addCore = [this, &emulator](const std::string& title,
-                                         const std::string& coreName,
-                                         char32_t icon,
-                                         std::function<void()> open) {
-            emulator.push_back(_action(title, L("配置 ") + coreName + L(" 核心参数"), icon,
-                [coreName]() { return coreName + "  >"; }, std::move(open)));
-        };
-        addCore(L("GBA 核心"), "mGBA", 0xE30F, [this]() { _openMgbaCore(); });
-        addCore(L("NDS 核心"), "melonDS", 0xE322, [this]() { _openMelonDsCore(); });
-        addCore(L("3DS 核心"), "Azahar", 0xE30F, [this]() { _openThreeDsCore(); });
-        addCore(L("FC/NES 核心"), "Nestopia", 0xE333,
-                [this]() { _openLibretroCore(L("Nestopia 核心设置"), CoreType::Nestopia); });
-        LibretroLoader::discoverCoreOptions(CoreType::Fceumm, beiklive::SettingManager);
-        if (!LibretroLoader::coreOptions(CoreType::Fceumm).empty()) {
-            addCore(L("FC/NES 核心"), "FCEUmm", 0xE333,
-                    [this]() { _openLibretroCore(L("FCEUmm 核心设置"), CoreType::Fceumm); });
-        }
-        addCore(L("SFC 核心"), "Snes9x", 0xE338,
-                [this]() { _openLibretroCore(L("Snes9x 核心设置"), CoreType::Snes9x); });
-        addCore(L("SFC 核心"), "Snes9x 2005", 0xE338,
-                [this]() { _openLibretroCore(L("Snes9x 2005 核心设置"), CoreType::Snes9x2005); });
-        addCore(L("GB/GBC 核心"), "GameBattle", 0xE30F,
-                [this]() { _openLibretroCore(L("GameBattle 核心设置"), CoreType::Gambatte); });
-        addCore(L("MD 核心"), "Genesis Plus GX", 0xE338,
-                [this]() { _openGenesisCore(); });
-        addCore(L("Arcade 核心"), "FBNeo", 0xE30F,
-                [this]() { _openFbneoCore(); });
-        addCore(L("Dreamcast 核心"), "Flycast", 0xE30F,
-                [this]() { _openFlycastCore(); });
-        addCore(L("PSP 核心"), "PPSSPP", 0xE30F,
-                [this]() { _openPpssppCore(); });
-        addCore(L("PS1 核心"), "DuckStation", 0xE30F,
-                [this]() { _openDuckStationCore(); });
-        addCore(L("Saturn 核心"), "YabaSanshiro", 0xE30F,
-                [this]() { _openYabaSanshiroCore(); });
-        addCore(L("GC / Wii 核心"), "Dolphin", 0xE30F,
-                [this]() { _openDolphinCore(); });
+        emulator.push_back(_action(L("核心管理"), L("选择游戏平台并配置模拟器核心"), beiklive::material::SETTINGS,
+            [this]() { return std::string(L("进入  >")); },
+            [this]() { _openCoreBrowser(CoreBrowserMode::Management); }));
 
         emulator.push_back(_section(L("存档与封面")));
-        emulator.push_back(_selector(L("SRAM 存档目录"), L("选择 SRAM 与 ROM 同目录或模拟器统一目录"), beiklive::material::STORAGE,
-            {L("ROM 所在目录"), L("模拟器目录")},
-            []() { return cfgGetStr("save.sramDir", "").empty() ? 0 : 1; },
-            [](int i) { cfgSetStr("save.sramDir", i == 0 ? "" : beiklive::path::savePath()); }));
         const std::vector<std::string> slots = {
             L("关闭"), L("档位0"), L("档位1"), L("档位2"), L("档位3"), L("档位4"), L("档位5"), L("档位6"), L("档位7"), L("档位8"), L("档位9")};
         emulator.push_back(_selector(L("自动保存游戏状态"), L("启动游戏后使用的自动存档档位"), beiklive::material::SAVE, slots,
@@ -1726,6 +1783,23 @@ private:
                 if (m_host.applyUiTheme) m_host.applyUiTheme();
                 invalidate();
             }));
+        emulator.push_back(_selector(L("主页布局(重启后生效)"), L("选择首页的布局样式，重启应用后生效"), 0xE8A1,
+            {L("Switch 布局"), L("IISU 布局")},
+            []() {
+                const int cur = cfgGetInt("theme", (int)beiklive::enums::ThemeLayout::SWITCH_THEME);
+                if (cur == (int)beiklive::enums::ThemeLayout::IISU_THEME) return 1;
+                return 0;
+            },
+            [](int i) {
+                cfgSetInt("theme", i == 1
+                    ? (int)beiklive::enums::ThemeLayout::IISU_THEME
+                    : (int)beiklive::enums::ThemeLayout::SWITCH_THEME);
+            }));
+        emulator.push_back(_selector(L("IISU 卡片行数"), L("设置 IISU 首页卡片行数，行数越多卡片越小"), 0xE8A1,
+            {L("三行"), L("四行")},
+            []() { return std::clamp(cfgGetInt("iisu.rows", 3) - 3, 0, 1); },
+            [](int i) { cfgSetInt("iisu.rows", i + 3); }));
+        emulator.push_back(_section(L("背景")));
         emulator.push_back(_toggle(L("动态渐变背景"), L("显示与主页一致的动态背景"), 0xE3B7,
             []() { return cfgGetBool(KEY_UI_SHOW_SHADER, false); },
             [this](bool v) { cfgSetBool(KEY_UI_SHOW_SHADER, v); if (m_host.showShader) m_host.showShader(v); }));
@@ -1739,22 +1813,10 @@ private:
                 if (!m_host.setGradientTheme) return;
                 m_host.setGradientTheme(gradientThemeFromId(themeValues[i]));
             }));
-        emulator.push_back(_selector(L("主页布局(重启后生效)"), L("选择首页的布局样式，重启应用后生效"), 0xE8A1,
-            {L("Switch 布局"), L("IISU 布局")},
-            []() {
-                const int cur = cfgGetInt("theme", (int)beiklive::enums::ThemeLayout::SWITCH_THEME);
-                if (cur == (int)beiklive::enums::ThemeLayout::IISU_THEME) return 1;
-                return 0;
-            },
-            [](int i) {
-                cfgSetInt("theme", i == 1
-                    ? (int)beiklive::enums::ThemeLayout::IISU_THEME
-                    : (int)beiklive::enums::ThemeLayout::SWITCH_THEME);
-            }));
-        emulator.push_back(_toggle(L("启用背景图片"), L("在动态背景上显示自定义 PNG、GIF 或 MP4 图片"), beiklive::material::IMAGE,
+        emulator.push_back(_toggle(L("启用背景图片"), L("在动态背景上显示自定义 PNG、GIF图片 或 MP4视频"), beiklive::material::IMAGE,
             []() { return cfgGetBool(KEY_UI_SHOW_BG_IMAGE, false); },
             [this](bool v) { cfgSetBool(KEY_UI_SHOW_BG_IMAGE, v); if (m_host.showBackground) m_host.showBackground(v); }));
-        emulator.push_back(_action(L("背景图片路径"), L("从文件浏览器选择 PNG、GIF 或 MP4 图片"), beiklive::material::IMAGE,
+        emulator.push_back(_action(L("背景图片路径"), L("从文件浏览器选择 PNG、GIF图片 或 MP4视频(视频要求小于128MB，编码H264 最高720p 帧数不要高于60fps,30fps最流畅)"), beiklive::material::IMAGE,
             []() { const auto path = cfgGetStr(KEY_UI_BG_IMAGE_PATH, ""); return path.empty() ? L("未设置") : beiklive::tools::getFileName(path); },
             [this]() {
                 const std::filesystem::path current(cfgGetStr(KEY_UI_BG_IMAGE_PATH, ""));
@@ -1763,6 +1825,26 @@ private:
                     if (m_host.setBackgroundImage) m_host.setBackgroundImage(path);
                     invalidate();
                 }, current.parent_path().string(), current.filename().string());
+            }));
+        emulator.push_back(_toggle(L("播放背景视频声音"), L("仅对 MP4 背景生效；进入游戏页面时自动停止"), 0xE8D5,
+            []() { return cfgGetBool(KEY_UI_BG_VIDEO_AUDIO, false); },
+            [](bool v) { cfgSetBool(KEY_UI_BG_VIDEO_AUDIO, v); }));
+        const std::vector<int> bgVideoVolumeValues = {0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200};
+        emulator.push_back(_selector(L("背景视频音量"), L("调整 MP4 背景视频的独立音量，最高 200%"), 0xE8D5,
+            {L("0%"), L("20%"), L("40%"), L("60%"), L("80%"), L("100%"), L("120%"), L("140%"), L("160%"), L("180%"), L("200%")},
+            [bgVideoVolumeValues]() {
+                const int current = cfgGetInt(KEY_UI_BG_VIDEO_VOLUME, 60);
+                int best = 0;
+                int distance = std::abs(current - bgVideoVolumeValues[0]);
+                for (int i = 1; i < static_cast<int>(bgVideoVolumeValues.size()); ++i) {
+                    const int d = std::abs(current - bgVideoVolumeValues[i]);
+                    if (d < distance) { best = i; distance = d; }
+                }
+                return best;
+            },
+            [bgVideoVolumeValues](int index) {
+                if (index >= 0 && index < static_cast<int>(bgVideoVolumeValues.size()))
+                    cfgSetInt(KEY_UI_BG_VIDEO_VOLUME, bgVideoVolumeValues[index]);
             }));
         emulator.push_back(_selector(L("GIF播放速度"), L("影响 GIF 背景播放速度；切换后立即生效"), 0xE8D5,
             {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"},
@@ -1782,6 +1864,7 @@ private:
                 if (index >= 0 && index < 6)
                     SET_SETTING_KEY_FLOAT(KEY_UI_BG_GIF_SPEED, speeds[index]);
             }));
+        emulator.push_back(_section(L("界面")));
         emulator.push_back(_toggle(L("文件列表滚动动画"), L("关闭后文件列表会直接跳转"), 0xE8D5,
             []() { return cfgGetBool(KEY_FILE_LIST_SCROLL_ANIM, true); },
             [](bool v) { cfgSetBool(KEY_FILE_LIST_SCROLL_ANIM, v); }));
@@ -1817,22 +1900,27 @@ private:
 
         auto& key = m_categories[1].items;
         key.push_back(_section(L("游戏平台")));
-        struct Platform { std::string name; std::string prefix; std::string hint; bool nds; };
+        struct Platform { std::string name; std::string prefix; std::string hint; bool nds; int externalPlatform; };
         static const Platform platforms[] = {
-            {L("GBA 按键映射"), "", L("Game Boy Advance 游戏"), false},
-            {L("GBC 按键映射"), "gbc.", L("Game Boy Color 游戏"), false},
-            {L("GB 按键映射"), "gb.", L("Game Boy 游戏"), false},
-            {L("FC/NES 按键映射"), "nes.", L("Nintendo Entertainment System 游戏"), false},
-            {L("SFC 按键映射"), "sfc.", L("Super Famicom 游戏"), false},
-            {L("NDS 按键映射"), "nds.", L("Nintendo DS 游戏与触摸指针热键"), true},
-            {L("3DS 按键映射"), "3ds.", L("Nintendo 3DS 游戏与双摇杆控制"), false},
-            {L("MD 按键映射"), "md.", L("Mega Drive 六键手柄与 Mode 键"), false},
-            {L("Arcade 按键映射"), "arcade.", L("外部街机核心按键与热键"), false},
-            {L("DC 按键映射"), "dc.", L("Dreamcast 外部核心按键与热键"), false},
-            {L("PSP 按键映射"), "psp.", L("PPSSPP 外部核心按键与热键"), false},
+            {L("GBA 按键映射"), "", L("Game Boy Advance 游戏"), false, -1},
+            {L("GBC 按键映射"), "gbc.", L("Game Boy Color 游戏"), false, -1},
+            {L("GB 按键映射"), "gb.", L("Game Boy 游戏"), false, -1},
+            {L("FC/NES 按键映射"), "nes.", L("Nintendo Entertainment System 游戏"), false, -1},
+            {L("SFC 按键映射"), "sfc.", L("Super Famicom 游戏"), false, -1},
+            {L("NDS 按键映射"), "nds.", L("Nintendo DS 游戏与触摸指针热键"), true, 6},
+            {L("3DS 按键映射"), "3ds.", L("Nintendo 3DS 游戏与双摇杆控制"), false, 7},
+            {L("MD 按键映射"), "md.", L("Mega Drive 六键手柄与 Mode 键"), false, -1},
+            {L("Arcade 按键映射"), "arcade.", L("外部街机核心按键与热键"), false, 9},
+            {L("DC 按键映射"), "dc.", L("Dreamcast 外部核心按键与热键"), false, 10},
+            {L("PSP 按键映射"), "psp.", L("PPSSPP 外部核心按键与热键"), false, 11},
+            {L("Saturn 按键映射"), "saturn.", L("YabaSanshiro 外部核心按键与热键"), false, 13},
+            {L("GC / Wii 按键映射"), "dolphin.", L("Dolphin 外部核心按键与热键"), false, 14},
         };
         for (const auto& platform : platforms)
         {
+            if (platform.externalPlatform >= 0 &&
+                !beiklive::path::externalCoreInstalled(platform.externalPlatform))
+                continue;
             NanoSettingItem item;
             item.kind = NanoSettingKind::Platform;
             item.title = platform.name;
@@ -1894,6 +1982,209 @@ private:
         _normalizeFocus();
     }
 
+    struct CorePlatformInfo
+    {
+        int platform;
+        const char* name;
+        int group;
+        int externalPlatform;
+    };
+
+    static const CorePlatformInfo* _corePlatforms(size_t& count)
+    {
+        static const CorePlatformInfo values[] = {
+            {(int)beiklive::enums::EmuPlatform::EmuGBA, "GBA", 1, -1},
+            {(int)beiklive::enums::EmuPlatform::EmuGBC, "GBC", 1, -1},
+            {(int)beiklive::enums::EmuPlatform::EmuGB, "GB", 1, -1},
+            {(int)beiklive::enums::EmuPlatform::EmuNES, "FC/NES", 1, -1},
+            {(int)beiklive::enums::EmuPlatform::EmuSNES, "SFC", 1, -1},
+            {(int)beiklive::enums::EmuPlatform::EmuNDS, "NDS", 1, 6},
+            {(int)beiklive::enums::EmuPlatform::Emu3DS, "3DS", 1, 7},
+            {(int)beiklive::enums::EmuPlatform::EmuGenesis, "MD", 2, -1},
+            {(int)beiklive::enums::EmuPlatform::EmuDreamcast, "DC", 2, 10},
+            {(int)beiklive::enums::EmuPlatform::EmuSaturn, "Saturn", 2, 13},
+            {(int)beiklive::enums::EmuPlatform::EmuPSP, "PSP", 3, 11},
+            {(int)beiklive::enums::EmuPlatform::EmuPS1, "PS1", 3, 12},
+            {(int)beiklive::enums::EmuPlatform::EmuArcade, "Arcade", 4, 9},
+            {(int)beiklive::enums::EmuPlatform::EmuDolphin, "GC / Wii", 1, 14},
+        };
+        count = sizeof(values) / sizeof(values[0]);
+        return values;
+    }
+
+    static const char* _coreVendorTitle(int group)
+    {
+        switch (group)
+        {
+        case 1: return "任天堂";
+        case 2: return "世嘉";
+        case 3: return "索尼";
+        case 4: return "街机";
+        default: return "其他";
+        }
+    }
+
+    void _openCoreBrowser(CoreBrowserMode mode)
+    {
+        m_coreSettingsOverlay = false;
+        m_coreBrowserMode = mode;
+        m_coreBrowserParent = CoreBrowserMode::None;
+        m_coreBrowserFilter = 0;
+        m_coreBrowserPlatform = -1;
+        m_coreBrowserFocus = 0;
+        m_coreBrowserScroll = m_coreBrowserTargetScroll = 0.f;
+        _buildCoreBrowserItems();
+        m_contentEntrance = 0.f;
+        invalidate();
+    }
+
+    void _openPlatformCoreBrowser(int platform)
+    {
+        m_coreSettingsOverlay = false;
+        m_coreBrowserParent = m_coreBrowserMode;
+        m_coreBrowserMode = CoreBrowserMode::Platform;
+        m_coreBrowserPlatform = platform;
+        m_coreBrowserFocus = 0;
+        m_coreBrowserScroll = m_coreBrowserTargetScroll = 0.f;
+        _buildCoreBrowserItems();
+        m_contentEntrance = 0.f;
+        invalidate();
+    }
+
+    void _buildCoreBrowserItems()
+    {
+        m_coreBrowserItems.clear();
+        m_coreBrowserGroups.clear();
+        m_coreBrowserRows.clear();
+        m_coreBrowserColumns.clear();
+        m_coreBrowserCardOffsets.clear();
+        m_coreBrowserContentHeight = 0.f;
+        size_t platformCount = 0;
+        const auto* platforms = _corePlatforms(platformCount);
+        if (m_coreBrowserMode == CoreBrowserMode::Platform)
+        {
+            LibretroLoader::discoverCoreOptions(CoreType::Fceumm, beiklive::SettingManager);
+            for (const auto& option : beiklive::GetCoreOptions(m_coreBrowserPlatform))
+            {
+                if (option.id == "fceumm" && LibretroLoader::coreOptions(CoreType::Fceumm).empty())
+                    continue;
+                const bool current = option.id == beiklive::GetDefaultCoreId(m_coreBrowserPlatform);
+                m_coreBrowserItems.push_back(_action(
+                    option.name,
+                    current ? L("当前核心") : L("可用核心"),
+                    0xE322,
+                    [current]() { return current ? std::string(L("当前核心")) : std::string(L("设置")); },
+                    [this, platform = m_coreBrowserPlatform, id = option.id]() {
+                        _openCoreOption(platform, id);
+                    }));
+                m_coreBrowserGroups.push_back(-1);
+            }
+            _rebuildCoreBrowserLayout();
+            m_coreBrowserFocus = _firstFocusable(m_coreBrowserItems);
+            return;
+        }
+
+        for (size_t i = 0; i < platformCount; ++i)
+        {
+            const auto& info = platforms[i];
+            if (info.externalPlatform >= 0 &&
+                !beiklive::path::externalCoreInstalled(info.externalPlatform))
+                continue;
+            if (m_coreBrowserFilter != 0 && info.group != m_coreBrowserFilter)
+                continue;
+            const std::string coreName = beiklive::GetCoreDisplayName(
+                info.platform, beiklive::GetDefaultCoreId(info.platform));
+            m_coreBrowserItems.push_back(_action(
+                info.name,
+                L("配置 ") + coreName + L(" 核心"),
+                0xE322,
+                [coreName]() { return coreName + "  >"; },
+                [this, platform = info.platform]() { _openPlatformCoreBrowser(platform); }));
+            m_coreBrowserGroups.push_back(info.group);
+        }
+        _rebuildCoreBrowserLayout();
+        m_coreBrowserFocus = _firstFocusable(m_coreBrowserItems);
+    }
+
+    void _rebuildCoreBrowserLayout()
+    {
+        m_coreBrowserRows.assign(m_coreBrowserItems.size(), 0);
+        m_coreBrowserColumns.assign(m_coreBrowserItems.size(), 0);
+        m_coreBrowserCardOffsets.assign(m_coreBrowserItems.size(), 0.f);
+        if (m_coreBrowserItems.empty())
+            return;
+
+        float cursorY = m_coreBrowserMode == CoreBrowserMode::Management ? 52.f : 0.f;
+        size_t index = 0;
+        while (index < m_coreBrowserItems.size())
+        {
+            const int group = index < m_coreBrowserGroups.size()
+                ? m_coreBrowserGroups[index] : -1;
+            size_t end = index + 1;
+            while (end < m_coreBrowserItems.size() &&
+                   end < m_coreBrowserGroups.size() &&
+                   m_coreBrowserGroups[end] == group)
+                ++end;
+
+            // The management view reserves a compact title band before each vendor.
+            if (m_coreBrowserMode == CoreBrowserMode::Management)
+                cursorY += 34.f;
+            const size_t groupCount = end - index;
+            for (size_t j = 0; j < groupCount; ++j)
+            {
+                const size_t itemIndex = index + j;
+                m_coreBrowserRows[itemIndex] = static_cast<int>(j);
+                m_coreBrowserColumns[itemIndex] = 0;
+                m_coreBrowserCardOffsets[itemIndex] = cursorY + static_cast<float>(j) * 84.f;
+            }
+            cursorY += static_cast<float>(groupCount) * 84.f;
+            index = end;
+        }
+        m_coreBrowserContentHeight = cursorY;
+    }
+
+    void _openCoreOption(int platform, const std::string& coreId)
+    {
+        brls::Logger::debug("openCoreOption platform={} core={}", platform, coreId);
+        m_coreSettingsOverlay = true;
+        m_coreBrowserMode = CoreBrowserMode::Platform;
+        m_coreBrowserPlatform = platform;
+        m_coreBrowserParent = CoreBrowserMode::Management;
+        _buildCoreBrowserItems();
+        if (platform == (int)beiklive::enums::EmuPlatform::EmuGBA ||
+            platform == (int)beiklive::enums::EmuPlatform::EmuGBC ||
+            platform == (int)beiklive::enums::EmuPlatform::EmuGB)
+        {
+            if (coreId == "gambatte")
+                _openLibretroCore(L("GameBattle 核心设置"), CoreType::Gambatte);
+            else
+                _openMgbaCore();
+        }
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuNES)
+        {
+            _openLibretroCore(coreId == "fceumm" ? L("FCEUmm 核心设置") : L("Nestopia 核心设置"),
+                              coreId == "fceumm" ? CoreType::Fceumm : CoreType::Nestopia);
+        }
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuSNES)
+        {
+            _openLibretroCore(coreId == "snes9x" ? L("Snes9x 核心设置") : L("Snes9x 2005 核心设置"),
+                              coreId == "snes9x" ? CoreType::Snes9x : CoreType::Snes9x2005);
+        }
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuNDS)
+        {
+            if (coreId == "drastic-external") _openDraSticCore();
+            else _openMelonDsCore();
+        }
+        else if (platform == (int)beiklive::enums::EmuPlatform::Emu3DS) _openThreeDsCore();
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuGenesis) _openGenesisCore();
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuArcade) _openFbneoCore();
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuDreamcast) _openFlycastCore();
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuPSP) _openPpssppCore();
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuPS1) _openDuckStationCore();
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuSaturn) _openYabaSanshiroCore();
+        else if (platform == (int)beiklive::enums::EmuPlatform::EmuDolphin) _openDolphinCore();
+    }
+
     void _buildDisplaySettings()
     {
         using namespace beiklive::SettingKey;
@@ -1909,10 +2200,6 @@ private:
             {L("自动"), L("1倍"), L("2倍"), L("3倍"), L("4倍"), L("5倍")},
             [scaleValues]() { const int cur = cfgGetInt("display.integer_scale_mult", 0); for (int i = 0; i < 6; ++i) if (scaleValues[i] == cur) return i; return 0; },
             [scaleValues](int i) { if (i >= 0 && i < 6) cfgSetInt("display.integer_scale_mult", scaleValues[i]); }));
-        display.push_back(_selector(L("纹理过滤"), L("像素风格更锐利，平滑模式边缘更柔和"), 0xE3F4,
-            {L("像素风格（Nearest）"), L("平滑（Linear）")},
-            []() { return cfgGetStr("display.filter", "nearest") == "linear" ? 1 : 0; },
-            [](int i) { cfgSetStr("display.filter", i == 1 ? "linear" : "nearest"); }));
         display.push_back(_toggle(L("显示快进覆盖层"), L("快进时显示状态提示"), 0xE01F,
             []() { return cfgGetBool("display.showFfOverlay", true); }, [](bool v) { cfgSetBool("display.showFfOverlay", v); }));
         display.push_back(_toggle(L("显示倒带覆盖层"), L("倒带时显示状态提示"), 0xE166,
@@ -1957,8 +2244,29 @@ private:
         using namespace beiklive::SettingKey;
         auto& audio = m_categories[4].items;
         audio.push_back(_section(L("音频输出")));
+        const std::vector<int> masterVolumeValues = {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
+        std::vector<std::string> masterVolumeLabels;
+        for (int v : masterVolumeValues) {
+            masterVolumeLabels.push_back(v == 0 ? L("静音") : std::to_string(v) + "%");
+        }
+        audio.push_back(_selector(L("主音量"), L("全局音量，同时影响游戏音频与界面音效"), 0xE425,
+            masterVolumeLabels,
+            [masterVolumeValues]() { const int cur = cfgGetInt(KEY_AUDIO_MASTER_VOLUME, 100); for (int i = 0; i < static_cast<int>(masterVolumeValues.size()); ++i) if (masterVolumeValues[i] == cur) return i; return 10; },
+            [masterVolumeValues](int i) {
+                if (i < 0 || i >= static_cast<int>(masterVolumeValues.size())) return;
+                const int v = masterVolumeValues[i];
+                cfgSetInt(KEY_AUDIO_MASTER_VOLUME, v);
+                beiklive::AudioManager::instance().setMasterVolume(
+                    static_cast<float>(v) / 100.0f);
+            }, KEY_AUDIO_MASTER_VOLUME));
         audio.push_back(_toggle(L("按钮音效"), L("播放界面导航和确认音效"), 0xE050,
             []() { return cfgGetBool("audio.buttonSfx", true); }, [](bool v) { cfgSetBool("audio.buttonSfx", v); }));
+        const std::vector<int> volumeValues = {0, 25, 50, 75, 100};
+        const std::vector<std::string> volumeLabels = {L("静音"), "25%", "50%", "75%", "100%"};
+        audio.push_back(_selector(L("按键音效音量"), L("调整界面导航和确认音效的音量"), 0xE050,
+            volumeLabels,
+            [volumeValues]() { const int cur = cfgGetInt(KEY_AUDIO_BUTTON_SFX_VOLUME, 100); for (int i = 0; i < static_cast<int>(volumeValues.size()); ++i) if (volumeValues[i] == cur) return i; return 4; },
+            [volumeValues](int i) { if (i >= 0 && i < static_cast<int>(volumeValues.size())) cfgSetInt(KEY_AUDIO_BUTTON_SFX_VOLUME, volumeValues[i]); }));
         const std::vector<int> targetValues = {60, 90, 120, 160};
         audio.push_back(_selector(L("目标缓冲延迟"), L("越低反馈越快，越高越不容易断音"), 0xE425,
             {"60 ms", "90 ms", "120 ms", "160 ms"},
@@ -2018,13 +2326,98 @@ private:
             [](bool v) { cfgSetBool(KEY_DEBUG_LOG_OVERLAY, v); brls::Application::enableDebuggingView(v); }));
     }
 
-    void _pickFile(const std::string& key, const std::vector<std::string>& extensions)
+    void _pickFile(const std::string& key, const std::vector<std::string>& extensions,
+                   const std::string& startPath = "")
     {
         const std::filesystem::path current(cfgGetStr(key, ""));
+        const std::string startDir =
+            current.parent_path().empty() ? startPath : current.parent_path().string();
         beiklive::openFilePicker(extensions, [this, key](const std::string& path) {
             cfgSetStr(key, path);
             invalidate();
-        }, current.parent_path().string(), current.filename().string());
+        }, startDir, current.filename().string());
+    }
+
+    void _pickDirectory(const std::string& key, const std::string& startPath)
+    {
+        auto* flPage = new beiklive::FileListPage();
+        flPage->setDirSelectionMode(true);
+        flPage->registerAction(L("选择目录"), brls::BUTTON_Y,
+            [this, flPage, key](brls::View*) -> bool {
+                const std::string dirPath = flPage->getHeader()->getPath();
+                if (dirPath.empty())
+                    return true;
+                cfgSetStr(key, dirPath);
+                brls::Application::popActivity(brls::TransitionAnimation::FADE);
+                invalidate();
+                return true;
+            });
+
+        auto* container = new brls::Box(brls::Axis::COLUMN);
+        container->setGrow(1.0f);
+        container->addView(flPage);
+        container->registerAction(L("关闭"), brls::BUTTON_START,
+            [](brls::View*) { brls::Application::popActivity(); return true; });
+
+        auto* frame = new brls::AppletFrame(container);
+        frame->setHeaderVisibility(brls::Visibility::GONE);
+        frame->setFooterVisibility(brls::Visibility::GONE);
+        frame->setBackground(brls::ViewBackground::NONE);
+        brls::Application::pushActivity(new brls::Activity(frame));
+
+        std::error_code ec;
+        const std::string current = cfgGetStr(key, "");
+        const std::string start = !current.empty() ? current : startPath;
+        if (!start.empty() && std::filesystem::is_directory(start, ec))
+            flPage->setPath(start);
+        else
+            flPage->showDriveList();
+    }
+
+    NanoSettingItem _filePickerItem(const std::string& title, const std::string& hint, char32_t icon,
+                                    const std::string& key, const std::vector<std::string>& extensions,
+                                    const std::string& emptyLabel, const std::string& startPath)
+    {
+        NanoSettingItem item;
+        item.kind = NanoSettingKind::Action;
+        item.title = title;
+        item.hint = hint;
+        item.icon = icon;
+        item.configKey = key;
+        item.value = [key, emptyLabel]() {
+            const std::string path = cfgGetStr(key, "");
+            return path.empty() ? emptyLabel : std::filesystem::path(path).filename().string();
+        };
+        item.activate = [this, key, extensions, startPath]() { _pickFile(key, extensions, startPath); };
+        item.reset = [key]() {
+            return beiklive::SettingManager
+                && beiklive::SettingManager->ResetToDefault(key)
+                && beiklive::SettingManager->Save();
+        };
+        return item;
+    }
+
+    NanoSettingItem _directoryItem(const std::string& title, const std::string& hint, char32_t icon,
+                                   const std::string& key, const std::string& emptyLabel,
+                                   const std::string& startPath)
+    {
+        NanoSettingItem item;
+        item.kind = NanoSettingKind::Action;
+        item.title = title;
+        item.hint = hint;
+        item.icon = icon;
+        item.configKey = key;
+        item.value = [key, emptyLabel]() {
+            const std::string path = cfgGetStr(key, "");
+            return path.empty() ? emptyLabel : std::filesystem::path(path).filename().string();
+        };
+        item.activate = [this, key, startPath]() { _pickDirectory(key, startPath); };
+        item.reset = [key]() {
+            return beiklive::SettingManager
+                && beiklive::SettingManager->ResetToDefault(key)
+                && beiklive::SettingManager->Save();
+        };
+        return item;
     }
 
     static std::string _coreCategoryTitle(const std::string& category)
@@ -2227,27 +2620,6 @@ private:
         invalidate();
     }
 
-    void _appendExternalCorePaths(const std::string& coreName,
-                                  const std::string& pathKey,
-                                  const std::string& defaultPath,
-                                  const std::string& returnKey)
-    {
-        m_coreItems.push_back(_action(
-            coreName + L(" NRO 路径"), L("链式调用时启动的外部核心 Stub"), beiklive::material::DESCRIPTION,
-            [pathKey, defaultPath]() {
-                const auto p = cfgGetStr(pathKey, defaultPath);
-                return p.empty() ? L("未设置  >") : beiklive::tools::getFileName(p) + "  >";
-            },
-            [this, pathKey]() { _pickFile(pathKey, {"nro"}); }));
-        m_coreItems.push_back(_action(
-            L("返回主程序路径"), L("外部核心退出游戏后返回的 GBAStation NRO"), beiklive::material::DESCRIPTION,
-            [returnKey]() {
-                const auto p = cfgGetStr(returnKey, "sdmc:/switch/GBAStation.nro");
-                return p.empty() ? L("未设置  >") : beiklive::tools::getFileName(p) + "  >";
-            },
-            [this, returnKey]() { _pickFile(returnKey, {"nro"}); }));
-    }
-
     void _appendExternalDisplaySettings(const std::string& prefix,
                                         const std::vector<std::string>& sizeValues,
                                         const std::vector<std::string>& sizeLabels,
@@ -2327,6 +2699,56 @@ private:
         if (key == "ppsspp_analog_deadzone") return {"0.00", "0.10", "0.15", "0.20", "0.25", "0.30"};
         if (key == "ppsspp_analog_sensitivity") return {"0.80", "0.90", "1.00", "1.10", "1.20", "1.30"};
         if (key == "ppsspp_language") return {"Automatic", "English", "Japanese", "French", "Spanish", "German", "Italian", "Korean", "Chinese Traditional", "Chinese Simplified"};
+        if (key == "region") return {"Auto", "NTSC-J", "NTSC-U", "PAL"};
+        if (key == "executionMode") return {"Interpreter", "CachedInterpreter", "Recompiler"};
+        if (key == "fastmemMode") return {"Disabled", "LUT", "MMap"};
+        if (key == "renderer") return {"deko3D", "Software"};
+        if (key == "textureFilter") return {"Nearest", "Bilinear", "JINC2"};
+        if (key == "lineDetectMode") return {"Disabled", "Quads", "BasicTriangles", "AggressiveTriangles"};
+        if (key == "deinterlacingMode") return {"Disabled", "Weave", "Blend", "Adaptive"};
+        if (key == "cropMode") return {"None", "Overscan", "Borders"};
+        if (key == "aspectRatio") return {"Auto (Game Native)", "4:3", "16:9", "Stretch To Fill"};
+        if (key == "alignment") return {"LeftOrTop", "Center", "RightOrBottom"};
+        if (key == "scaling") return {"Nearest", "BilinearSmooth", "NearestInteger", "BilinearSharp"};
+        if (key == "downsampleMode") return {"Disabled", "Box", "Adaptive"};
+        if (key == "wireframeMode") return {"Disabled", "OverlayWireframe", "OnlyWireframe"};
+        if (key == "screenshotMode") return {"ScreenResolution", "InternalResolution", "UncorrectedInternalResolution"};
+        if (key == "screenshotFormat") return {"PNG", "JPEG", "WebP"};
+        if (key == "backend") return {"Null", "Switch"};
+        if (key == "stretchMode") return {"None", "Resample", "TimeStretch"};
+        if (key == "multitapMode") return {"Disabled", "Port 1", "Port 2", "Both"};
+        if (key == "card1Type" || key == "card2Type") return {"None", "Shared", "PerGame", "PerGameTitle", "PerGameFileTitle", "NonPersistent"};
+        if (key == "logLevel") return {"None", "Error", "Warning", "Perf", "Info", "Verbose", "Dev", "Profile", "Debug", "Trace"};
+        // PS1 numeric settings are presented as discrete lists, not keyboard input.
+        if (key == "emulationSpeed" || key == "fastForwardSpeed" || key == "turboSpeed")
+            return {"0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "4.0", "5.0", "10.0"};
+        if (key == "runaheadFrameCount") return {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
+        if (key == "rewindFrequency") return {"1", "2", "5", "10", "20", "30", "60"};
+        if (key == "rewindSaveSlots") return {"1", "5", "10", "20", "50", "100", "200"};
+        if (key == "overclockPercent") return {"50", "75", "100", "125", "150", "200", "300", "400", "500", "750", "1000"};
+        if (key == "multisamples") return {"1", "2", "4", "8", "16"};
+        if (key == "readaheadSectors") return {"0", "1", "2", "4", "8", "16", "32"};
+        if (key == "readSpeedup") return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
+        if (key == "seekSpeedup") return {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
+        if (key == "outputLatencyMS") return {"0", "10", "20", "30", "40", "60", "80", "100", "150", "200", "300", "500"};
+        if (key == "bufferMS") return {"10", "20", "30", "50", "75", "100", "150", "200", "300", "500"};
+        if (key == "screenshotQuality") return {"50", "60", "70", "80", "85", "90", "95", "100"};
+        if (key == "maxFPS") return {"0", "15", "20", "30", "40", "50", "60", "75", "90", "120", "144", "165", "240", "500"};
+        if (key == "preFrameSleepBuffer") return {"0", "1", "2", "3", "5", "8", "10", "15", "20"};
+        if (key == "pgxpTolerance") return {"-1", "0", "0.5", "1", "2", "3", "5", "10"};
+        if (key == "pgxpDepthClearThreshold") return {"0", "100", "300", "500", "1000", "2000", "3000", "4096"};
+        if (key == "downsampleScale") return {"1", "2", "3", "4"};
+        if (key == "outputVolume" || key == "fastForwardVolume")
+            return {"0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100"};
+        if (key == "dolphin_language") return {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"};
+        if (key == "dolphin_vi_skip") return {"off", "auto", "on"};
+        if (key == "dolphin_shader_compilation_mode") return {"0", "1", "2", "3"};
+        if (key == "dolphin_anti_aliasing") return {"0", "2", "4", "8"};
+        if (key == "dolphin_efb_scale") return {"1", "2", "3", "4"};
+        if (key == "dolphin_texture_cache_accuracy") return {"0", "64", "128", "512"};
+        if (key == "dolphin_pointer_yaw") return {"30", "45", "60", "70", "90", "120"};
+        if (key == "dolphin_wiimote1_source" || key == "dolphin_wiimote2_source" || key == "dolphin_wiimote3_source" || key == "dolphin_wiimote4_source") return {"none", "emulated"};
+        if (key == "dolphin_wiimote1_mode" || key == "dolphin_wiimote2_mode" || key == "dolphin_wiimote3_mode" || key == "dolphin_wiimote4_mode") return {"classic", "vertical", "sideways", "nunchuk"};
         if (key == "reicast_renderer") return {"vulkan"};
         if (key == "reicast_internal_resolution") return {"640x480", "960x720", "1280x960", "1920x1440"};
         if (key == "reicast_region") return {"USA", "Japan", "Europe"};
@@ -2368,6 +2790,23 @@ private:
         return {value};
     }
 
+    static bool _externalOptionIsNumeric(const std::string& key)
+    {
+        static const std::array<const char*, 19> numericKeys = {{
+            "dolphin_cpu_clock_rate", "dolphin_emulation_speed", "dolphin_efb_scale",
+            "dolphin_anti_aliasing", "dolphin_texture_cache_accuracy", "dolphin_audio_latency",
+            "dolphin_audio_volume", "dolphin_log_level", "dolphin_pointer_yaw",
+            "dolphin_sync_gpu_max_distance", "dolphin_sync_gpu_min_distance",
+            "dolphin_sync_gpu_overclock", "dolphin_custom_rtc_value", "dolphin_efb_access_tile_size",
+            "dolphin_max_anisotropy", "dolphin_mipmap_detection_threshold",
+            "dolphin_shader_compiler_threads", "dolphin_shader_precompiler_threads",
+            "dolphin_command_buffer_execute_interval"
+        }};
+        return std::any_of(numericKeys.begin(), numericKeys.end(), [&key](const char* candidate) {
+            return key == candidate;
+        });
+    }
+
     // External cores deliberately keep their own JSONC files.  The launcher is
     // the common source of truth, so every option is mirrored in config.cfg and
     // copied into the JSONC file by the core before it boots.
@@ -2380,10 +2819,19 @@ private:
                 category = option.category;
                 m_coreItems.push_back(_section(category));
             }
-            const std::string configKey = "core." + prefix + "." + option.key;
+            // PS1 core options use the core.ps1.* namespace. Input mappings
+            // stay in ps1.* and are handled by the separate mapping page.
+            const std::string configKey = (prefix == "ps1" || prefix == "core.ps1") ?
+                (std::string("core.ps1.") + option.key) : ("core." + prefix + "." + option.key);
             const std::string fallback = option.defaultValue;
             if (beiklive::SettingManager)
                 beiklive::SettingManager->SetDefault(configKey, ConfigValue(fallback));
+            if (_externalOptionIsNumeric(option.key)) {
+                m_coreItems.push_back(_textValue(
+                    option.title, _externalOptionDescription(option), beiklive::material::SETTINGS,
+                    configKey, fallback));
+                continue;
+            }
             const std::vector<std::string> values = _externalOptionValues(option);
             std::vector<std::string> labels;
             labels.reserve(values.size());
@@ -2514,20 +2962,152 @@ private:
         _finishCorePage(L("melonDS 核心设置"));
     }
 
+    void _openDraSticCore()
+    {
+        m_coreItems.clear();
+        auto selStr = [this](const char* title, const char* hint, char32_t icon,
+                             const char* key, std::vector<std::string> values,
+                             std::vector<std::string> labels, const char* def) {
+            m_coreItems.push_back(_selector(L(title), L(hint), icon, std::move(labels),
+                [key, values, def]() { return findIndex(values, cfgGetStr(key, def)); },
+                [key, values](int i) {
+                    if (i >= 0 && i < static_cast<int>(values.size()))
+                        cfgSetStr(key, values[static_cast<size_t>(i)]);
+                }, key));
+        };
+        auto selInt = [this](const char* title, const char* hint, char32_t icon,
+                             const char* key, std::vector<int> values,
+                             std::vector<std::string> labels, int def) {
+            m_coreItems.push_back(_selector(L(title), L(hint), icon, std::move(labels),
+                [key, values, def]() {
+                    const int current = cfgGetInt(key, def);
+                    for (size_t i = 0; i < values.size(); ++i)
+                        if (values[i] == current) return static_cast<int>(i);
+                    return 0;
+                },
+                [key, values](int i) {
+                    if (i >= 0 && i < static_cast<int>(values.size()))
+                        cfgSetInt(key, values[static_cast<size_t>(i)]);
+                }, key));
+        };
+        auto tog = [this](const char* title, const char* hint, char32_t icon,
+                          const char* key, bool def) {
+            m_coreItems.push_back(_toggle(L(title), L(hint), icon,
+                [key, def]() { return cfgGetBool(key, def); },
+                [key](bool v) { cfgSetBool(key, v); }, key));
+        };
+        auto intLabels = [](const std::vector<int>& values) {
+            std::vector<std::string> labels;
+            for (int v : values) labels.push_back(std::to_string(v));
+            return labels;
+        };
+
+        m_coreItems.push_back(_section(L("画面与滤镜")));
+        selStr("屏幕布局", "NDS 上下屏排列方式", 0xE40A, "core.drastic.layout",
+               {"vertical", "horizontal", "top", "bottom", "priority_top", "priority_bottom", "custom"},
+               {L("纵向"), L("横向"), L("仅上屏"), L("仅下屏"), L("上屏优先"), L("下屏优先"), L("自定义")},
+               "horizontal");
+        selInt("画面方向", "屏幕旋转角度", 0xE8B5, "core.drastic.rotation",
+               {0, 1, 2, 3}, {"0°", "90°", "180°", "270°"}, 0);
+        selInt("屏幕间距", "上下屏之间的像素间距", 0xE8D5, "core.drastic.screen_gap",
+               {0, 4, 8, 12, 16, 24, 32, 48, 64}, intLabels({0, 4, 8, 12, 16, 24, 32, 48, 64}), 8);
+        tog("整数倍缩放", "按整数倍缩放画面", 0xE3F4, "core.drastic.integer_scale", false);
+        selStr("内置滤镜", "DraStic 后处理滤镜", 0xE40A, "core.drastic.video_filter",
+               {"nearest", "linear", "quilez", "scanline", "scale2x", "hq2x", "fxaa", "fxaa_hq", "smaa", "custom"},
+               {L("最近邻"), L("线性"), "Quilez", "Scanline", "Scale2x", "HQ2x", "FXAA", L("FXAA 高质量"), "SMAA", L("自定义")},
+               "nearest");
+        {
+            std::vector<int> volumes;
+            std::vector<std::string> volumeLabels;
+            for (int v = 0; v <= 100; v += 10) {
+                volumes.push_back(v);
+                volumeLabels.push_back(std::to_string(v) + "%");
+            }
+            selInt("音量", "模拟器输出音量", 0xE050, "core.drastic.volume",
+                   volumes, volumeLabels, 100);
+        }
+
+        m_coreItems.push_back(_section(L("音频与麦克风")));
+        tog("声音", "启用模拟器声音输出", 0xE050, "core.drastic.sound_enabled", true);
+        selInt("音频延迟", "较大的值更稳定但延迟更高", 0xE8B5, "core.drastic.audio_latency",
+               {0, 1, 2, 3, 4}, intLabels({0, 1, 2, 3, 4}), 2);
+        selStr("麦克风来源", "模拟噪声或外接耳麦/USB 麦克风", 0xE050, "core.drastic.microphone_source",
+               {"noise", "external"}, {L("模拟噪声"), L("外接")}, "noise");
+        tog("麦克风", "启用 NDS 麦克风输入", 0xE050, "core.drastic.mic_enabled", true);
+
+        m_coreItems.push_back(_section(L("输入")));
+        tog("震动", "模拟震动包", 0xE3F4, "core.drastic.vibration", true);
+        tog("体感控制", "陀螺仪与加速度计", 0xE3B0, "core.drastic.motion", true);
+        selStr("虚拟触笔", "触笔控制方式", 0xE8B5, "core.drastic.stylus_mode",
+               {"off", "stick", "motion"}, {L("关闭"), L("右摇杆"), L("体感控制")}, "stick");
+        selInt("触笔速度", "模拟触笔移动速度", 0xE8B5, "core.drastic.stylus_speed",
+               {2, 4, 6, 8, 10, 12, 16, 20}, intLabels({2, 4, 6, 8, 10, 12, 16, 20}), 8);
+
+        m_coreItems.push_back(_section(L("性能")));
+        selInt("跳帧数量", "0 为不跳帧", 0xE8D5, "core.drastic.frameskip",
+               {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, intLabels({0, 1, 2, 3, 4, 5, 6, 7, 8, 9}), 0);
+        selInt("跳帧方式", "跳帧策略", 0xE8D5, "core.drastic.frameskip_type",
+               {0, 1, 2, 3}, {L("自动"), L("固定"), L("激进"), L("最大")}, 0);
+        tog("安全跳帧", "避免跳帧导致的画面异常", 0xE8D5, "core.drastic.frameskip_safe", false);
+        selInt("快进速度", "按住快进键时的速度", 0xE8EF, "core.drastic.fastforward_speed",
+               {0, 1, 2, 3, 4, 5}, {"50%", "150%", "200%", "300%", "400%", L("不限")}, 5);
+        selInt("CPU 线程", "CPU 模拟线程数", 0xE8EF, "core.drastic.cpu_threads",
+               {1, 2, 3, 4}, intLabels({1, 2, 3, 4}), 3);
+        tog("多线程 3D", "将 3D 渲染放到独立线程", 0xE8D5, "core.drastic.threaded_3d", true);
+        tog("高清 3D", "2 倍内部分辨率", 0xE8FF, "core.drastic.hires_3d", true);
+        selInt("连发速度", "自动连发速率", 0xE8EF, "core.drastic.autofire_speed",
+               {1, 2, 3, 4, 5}, intLabels({1, 2, 3, 4, 5}), 2);
+        selInt("自动存档间隔", "秒；0 为关闭", 0xE425, "core.drastic.autosave_interval",
+               {0, 60, 300, 600, 1200}, {L("关闭"), "60", "300", "600", "1200"}, 300);
+        tog("预加载 ROM", "进入游戏前预加载", 0xE8D5, "core.drastic.preload_roms", true);
+        tog("显示 FPS", "在画面角落显示帧率", 0xE8B5, "core.drastic.show_fps", false);
+
+        m_coreItems.push_back(_section(L("存储与金手指")));
+        tog("金手指", "启用 Action Replay 金手指", 0xE8EF, "core.drastic.cheats_enabled", true);
+        tog("存档备份到即时存档", "即时存档中包含电池存档", 0xE425, "core.drastic.backup_in_savestates", true);
+        tog("忽略卡带容量限制", "允许超出卡带容量的存档", 0xE425, "core.drastic.ignore_gamecard_limit", false);
+        tog("16 位色", "降低色彩精度以提升性能", 0xE40A, "core.drastic.use_16bit_color", false);
+        tog("自动裁剪", "裁剪 ROM 中的空白数据", 0xE8D5, "core.drastic.auto_trim", false);
+        tog("混合", "启用半透明混合", 0xE40A, "core.drastic.blend", false);
+        tog("原始存档格式", "使用通用 .sav 格式", 0xE425, "core.drastic.raw_save_format", true);
+        selInt("Slot-2 配件", "扩展槽设备类型", 0xE8EF, "core.drastic.slot2_type",
+               {0, 1, 2, 3, 4, 5},
+               {L("无"), L("GBA 卡带"), "SRAM", L("震动包"), L("体感包（官方）"), L("体感包（自制）")}, 1);
+        tog("禁用边缘标记", "关闭 3D 边缘标记", 0xE40A, "core.drastic.disable_edge_marking", false);
+        tog("修复主引擎画面", "修正主引擎画面问题", 0xE40A, "core.drastic.fix_main_engine_screen", false);
+        tog("Lua 脚本", "启用 Lua 脚本支持", 0xE8D5, "core.drastic.lua_enabled", true);
+
+        m_coreItems.push_back(_section(L("固件与 RTC")));
+        tog("RTC 跟随系统时间", "实时时钟使用系统时间", 0xE8B5, "core.drastic.rtc_system_time", true);
+        selInt("固件语言", "启动固件语言", 0xE8C4, "core.drastic.firmware_language",
+               {-1, 0, 1, 2, 3, 4, 5, 6},
+               {L("跟随固件"), L("日语"), L("英语"), L("法语"), L("德语"), L("意大利语"), L("西班牙语"), L("简体中文")}, -1);
+        selInt("固件颜色", "固件主题颜色", 0xE40A, "core.drastic.firmware_color",
+               {0, 1, 2, 3, 4, 5}, intLabels({0, 1, 2, 3, 4, 5}), 0);
+        selInt("生日月份", "固件设置的生日月份", 0xE8B5, "core.drastic.firmware_birthday_month",
+               {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, intLabels({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}), 6);
+        selInt("生日日期", "固件设置的生日日期", 0xE8B5, "core.drastic.firmware_birthday_day",
+               {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31},
+               intLabels({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}), 6);
+
+        m_coreItems.push_back(_section(L("帧生成（Lossless）")));
+        tog("启用帧生成", "需要 sdmc:/GBAStation/drastic/lsfg/Lossless.dll", 0xE8FF, "core.drastic.lsfg_enabled", false);
+        tog("性能模式", "帧生成性能优先（关闭以获得更好画质）", 0xE8EF, "core.drastic.lsfg_performance", false);
+        selStr("帧生成强度", "生成帧的运动估计分辨率；越高画质越好", 0xE8FF, "core.drastic.lsfg_flow_scale",
+               {"0.25", "0.5", "0.75", "1.0"}, {"0.25", "0.5", "0.75", "1.0"}, "1.0");
+
+        _finishCorePage(L("DraStic 核心设置"));
+    }
+
     void _openFbneoCore()
     {
         m_coreItems.clear();
-        m_coreItems.push_back(_section(L("外部核心")));
-        _appendExternalCorePaths(
-            "FBNeo", "arcade.externalNro.path", "/GBAStation/core/GBAStationFBNeoStub.nro",
-            "arcade.externalNro.returnPath");
-
-        m_coreItems.push_back(_section(L("画面")));
-        _appendExternalDisplaySettings(
-            "fbneo",
-            {"Auto", "4:3", "16:9", "Stretch", "Original", "1x", "2x"},
-            {L("自动"), "4:3", "16:9", L("拉伸"), L("原始"), "1x", "2x"},
-            "Auto");
+        // m_coreItems.push_back(_section(L("画面")));
+        // _appendExternalDisplaySettings(
+        //     "fbneo",
+        //     {"Auto", "4:3", "16:9", "Stretch", "Original", "1x", "2x"},
+        //     {L("自动"), "4:3", "16:9", L("拉伸"), L("原始"), "1x", "2x"},
+        //     "Auto");
         const std::vector<std::string> shaderValues = {"None", "xBRZ", "Eagle", "CrtEasyMode"};
         m_coreItems.push_back(_selector(
             L("着色器"), L("外部街机核心的画面滤镜"), 0xE40A,
@@ -2574,11 +3154,6 @@ private:
     void _openFlycastCore()
     {
         m_coreItems.clear();
-        m_coreItems.push_back(_section(L("外部核心")));
-        _appendExternalCorePaths(
-            "Flycast", "dc.externalNro.path", "/GBAStation/core/GBAStationFlycastStub.nro",
-            "dc.externalNro.returnPath");
-
         m_coreItems.push_back(_section(L("画面")));
         _appendExternalDisplaySettings(
             "flycast",
@@ -2684,11 +3259,6 @@ private:
     void _openPpssppCore()
     {
         m_coreItems.clear();
-        m_coreItems.push_back(_section(L("外部核心")));
-        _appendExternalCorePaths(
-            "PPSSPP", "psp.externalNro.path", "/GBAStation/core/GBAStationPPSSPPStub.nro",
-            "psp.externalNro.returnPath");
-
         m_coreItems.push_back(_section(L("性能与画面")));
         _appendExternalDisplaySettings(
             "ppsspp",
@@ -2779,66 +3349,247 @@ private:
     void _openDuckStationCore()
     {
         m_coreItems.clear();
-        m_coreItems.push_back(_section(L("外部核心")));
-        _appendExternalCorePaths(
-            "DuckStation", "ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
-            "ps1.externalNro.returnPath");
+        const auto setDefault = [](const char* key, const ConfigValue& value) {
+            if (beiklive::SettingManager)
+                beiklive::SettingManager->SetDefault(key, value);
+        };
 
-        m_coreItems.push_back(_section(L("画面与启动")));
-        const std::vector<std::string> resolutionValues = {"1", "2", "3", "4"};
-        m_coreItems.push_back(_selector(
-            L("内部渲染分辨率"), L("倍率越高画面越清晰，但性能开销也越大"), 0xE8FF,
-            {"1x", "2x", "3x", "4x"},
-            [resolutionValues]() {
-                return findIndex(resolutionValues, std::to_string(cfgGetInt("ps1.resolutionScale", 1)));
-            },
-            [resolutionValues](int i) {
-                if (i >= 0 && i < static_cast<int>(resolutionValues.size()))
-                    cfgSetInt("ps1.resolutionScale", std::stoi(resolutionValues[static_cast<size_t>(i)]));
-            }, "ps1.resolutionScale"));
-        const std::vector<std::string> aspectValues = {
-            "Auto (Game Native)", "4:3", "16:9", "Stretch To Fill"};
-        m_coreItems.push_back(_selector(
-            L("画面比例"), L("按游戏原始比例显示，或选择固定拉伸比例"), 0xE3F4,
-            {L("自动（游戏原始比例）"), "4:3", "16:9", L("拉伸填满")},
-            [aspectValues]() { return findIndex(aspectValues, cfgGetStr("ps1.aspectRatio", "Auto (Game Native)")); },
-            [aspectValues](int i) {
-                if (i >= 0 && i < static_cast<int>(aspectValues.size()))
-                    cfgSetStr("ps1.aspectRatio", aspectValues[static_cast<size_t>(i)]);
-            }, "ps1.aspectRatio"));
+        _appendExternalOptions("ps1", {
+            {"系统", "region", "主机区域", "Auto"},
+            {"系统", "enable8MBRAM", "8MB 扩展内存", "disabled"},
+            {"系统", "enableCheats", "启用金手指", "disabled"},
+            {"系统", "disableAllEnhancements", "禁用所有增强", "disabled"},
+            {"性能", "emulationSpeed", "模拟速度", "1.0"},
+            {"性能", "fastForwardSpeed", "快进速度", "0.0"},
+            {"性能", "turboSpeed", "涡轮速度", "2.0"},
+            {"性能", "syncToHostRefreshRate", "同步主机刷新率", "enabled"},
+            {"性能", "runaheadFrameCount", "预执行帧数", "0"},
+            {"性能", "rewindEnable", "启用倒带", "disabled"},
+            {"性能", "rewindFrequency", "倒带保存频率(秒)", "10"},
+            {"性能", "rewindSaveSlots", "倒带保存槽位", "10"},
+            {"音频", "outputVolume", "输出音量", "100"},
+            {"音频", "fastForwardVolume", "快进音量", "100"},
+            {"音频", "outputMuted", "静音", "disabled"},
+            {"音频", "backend", "音频后端", "Switch"},
+            {"音频", "stretchMode", "拉伸模式", "TimeStretch"},
+            {"音频", "outputLatencyMS", "音频延迟(ms)", "60"},
+            {"音频", "bufferMS", "音频缓冲(ms)", "100"},
+            {"存档", "saveStateOnExit", "退出时自动存档", "enabled"},
+            {"存档", "createSaveStateBackups", "保留存档备份", "enabled"},
+            {"存档", "loadDevicesFromSaveStates", "从存档加载设备", "disabled"},
+        });
+
+        // 记忆卡
+        m_coreItems.push_back(_section(L("记忆卡")));
+        setDefault("core.ps1.memoryCardDirectory", ConfigValue(""));
+        m_coreItems.push_back(_directoryItem(
+            L("记忆卡目录"), L("记忆卡镜像的存放目录；留空使用默认目录"), 0xE5A5,
+            "core.ps1.memoryCardDirectory", L("默认目录"), "sdmc:/GBAStation/duckstation/memcards"));
+        setDefault("core.ps1.usePlaylistTitle", ConfigValue("enabled"));
         m_coreItems.push_back(_toggle(
-            L("快速启动"), L("跳过 PlayStation BIOS 动画，关闭可获得更接近原机的启动过程"), 0xE8B5,
-            []() { return cfgGetBool("ps1.fastBoot", true); },
-            [](bool value) { cfgSetBool("ps1.fastBoot", value); }, "ps1.fastBoot"));
+            L("多碟共用一个卡"), L("多碟游戏使用同一张记忆卡"), 0xE5A5,
+            []() { return cfgGetStr("core.ps1.usePlaylistTitle", "enabled") == "enabled"; },
+            [](bool value) { cfgSetStr("core.ps1.usePlaylistTitle", value ? "enabled" : "disabled"); },
+            "core.ps1.usePlaylistTitle"));
+        const std::vector<std::string> cardTypeValues = {
+            "None", "Shared", "PerGame", "PerGameTitle", "PerGameFileTitle", "NonPersistent"};
+        const std::vector<std::string> cardTypeLabels = {
+            L("无记忆卡"), L("所有游戏共享"), L("每游戏（序列号）"), L("每游戏（标题）"), L("每游戏（文件名）"),
+            L("临时卡（不保存）")};
+        setDefault("core.ps1.card1Type", ConfigValue("PerGameTitle"));
+        m_coreItems.push_back(_selector(
+            L("记忆卡 1 类型"), L("选择插槽 1 使用的记忆卡类型"), 0xE5A5, cardTypeLabels,
+            [cardTypeValues]() { return findIndex(cardTypeValues, cfgGetStr("core.ps1.card1Type", "PerGameTitle")); },
+            [cardTypeValues](int i) {
+                if (i >= 0 && i < static_cast<int>(cardTypeValues.size()))
+                    cfgSetStr("core.ps1.card1Type", cardTypeValues[static_cast<size_t>(i)]);
+            }, "core.ps1.card1Type"));
+        setDefault("core.ps1.card2Type", ConfigValue("None"));
+        m_coreItems.push_back(_selector(
+            L("记忆卡 2 类型"), L("选择插槽 2 使用的记忆卡类型"), 0xE5A5, cardTypeLabels,
+            [cardTypeValues]() { return findIndex(cardTypeValues, cfgGetStr("core.ps1.card2Type", "None")); },
+            [cardTypeValues](int i) {
+                if (i >= 0 && i < static_cast<int>(cardTypeValues.size()))
+                    cfgSetStr("core.ps1.card2Type", cardTypeValues[static_cast<size_t>(i)]);
+            }, "core.ps1.card2Type"));
+        setDefault("core.ps1.card1Path", ConfigValue(""));
+        m_coreItems.push_back(_filePickerItem(
+            L("共享卡 1 文件"), L("共享类型下插槽 1 使用的记忆卡镜像；留空自动命名"), 0xE5A5,
+            "core.ps1.card1Path", {"mcd"}, L("自动"), "sdmc:/GBAStation/duckstation/memcards"));
+        setDefault("core.ps1.card2Path", ConfigValue(""));
+        m_coreItems.push_back(_filePickerItem(
+            L("共享卡 2 文件"), L("共享类型下插槽 2 使用的记忆卡镜像；留空自动命名"), 0xE5A5,
+            "core.ps1.card2Path", {"mcd"}, L("自动"), "sdmc:/GBAStation/duckstation/memcards"));
 
-        m_coreItems.push_back(_section(L("按键")));
-        m_coreItems.push_back(_action(
-            L("PS1 按键映射"), L("配置 DuckStation 外部核心使用的 config.cfg 映射"), 0xE30F,
-            []() { return std::string(L("进入配置  >")); },
-            [this]() { _openMappingPage(L("PS1 按键映射"), "ps1.", false); }));
+        // BIOS
+        m_coreItems.push_back(_section(L("BIOS")));
+        setDefault("core.ps1.biosPathNTSCJ", ConfigValue(""));
+        m_coreItems.push_back(_filePickerItem(
+            L("BIOS (NTSC-J)"), L("日版主机使用的 BIOS 文件；留空自动检测"), 0xE8B5,
+            "core.ps1.biosPathNTSCJ", {"bin"}, L("自动检测"), "sdmc:/GBAStation/bios/ps1"));
+        setDefault("core.ps1.biosPathNTSCU", ConfigValue(""));
+        m_coreItems.push_back(_filePickerItem(
+            L("BIOS (NTSC-U)"), L("美版主机使用的 BIOS 文件；留空自动检测"), 0xE8B5,
+            "core.ps1.biosPathNTSCU", {"bin"}, L("自动检测"), "sdmc:/GBAStation/bios/ps1"));
+        setDefault("core.ps1.biosPathPAL", ConfigValue(""));
+        m_coreItems.push_back(_filePickerItem(
+            L("BIOS (PAL)"), L("欧版主机使用的 BIOS 文件；留空自动检测"), 0xE8B5,
+            "core.ps1.biosPathPAL", {"bin"}, L("自动检测"), "sdmc:/GBAStation/bios/ps1"));
+        setDefault("core.ps1.fastBoot", ConfigValue(1));
+        m_coreItems.push_back(_toggle(
+            L("快速启动"), L("跳过 PlayStation BIOS 动画"), 0xE8B5,
+            []() { return cfgGetBool("core.ps1.fastBoot", true); },
+            [](bool value) { cfgSetBool("core.ps1.fastBoot", value); }, "core.ps1.fastBoot"));
+        setDefault("core.ps1.ttyLogging", ConfigValue("disabled"));
+        m_coreItems.push_back(_toggle(
+            L("BIOS TTY 日志"), L("记录 BIOS 的 printf 调用，仅用于调试"), 0xE8B5,
+            []() { return cfgGetStr("core.ps1.ttyLogging", "disabled") == "enabled"; },
+            [](bool value) { cfgSetStr("core.ps1.ttyLogging", value ? "enabled" : "disabled"); },
+            "core.ps1.ttyLogging"));
+
+        _appendExternalOptions("ps1", {
+            // 纹理替换
+            {"纹理替换", "enableVRAMWriteReplacements", "启用 VRAM 写入纹理替换", "disabled"},
+            {"纹理替换", "preloadTextures", "预载替换纹理", "disabled"},
+            {"纹理替换", "dumpVRAMWrites", "导出可替换 VRAM 写入", "disabled"},
+            {"纹理替换", "dumpVRAMWriteForceAlphaChannel", "导出写入强制 Alpha", "enabled"},
+            // 日志
+            {"日志", "logLevel", "日志级别", "Info"},
+            {"日志", "logToConsole", "日志到系统控制台", "disabled"},
+            {"日志", "logToDebug", "日志到调试控制台", "disabled"},
+            {"日志", "logToFile", "日志到文件", "disabled"},
+        });
+
         _finishCorePage(L("DuckStation 核心设置"));
     }
 
     void _openYabaSanshiroCore()
     {
         m_coreItems.clear();
-        m_coreItems.push_back(_section(L("外部核心")));
-        _appendExternalCorePaths(
-            "YabaSanshiro", "saturn.externalNro.path", "/GBAStation/core/GBAStationYabaSanshiroStub.nro",
-            "saturn.externalNro.returnPath");
+
+        auto intSelector = [this](const std::string& title, const std::string& hint, char32_t icon,
+                                  const std::string& configKey, int fallback,
+                                  const std::vector<int>& values,
+                                  const std::vector<std::string>& labels) {
+            m_coreItems.push_back(_selector(
+                title, hint, icon, labels,
+                [configKey, fallback, values]() {
+                    const int current = cfgGetInt(configKey, fallback);
+                    for (int i = 0; i < static_cast<int>(values.size()); ++i)
+                        if (values[static_cast<size_t>(i)] == current)
+                            return i;
+                    return 0;
+                },
+                [configKey, values](int index) {
+                    if (index >= 0 && index < static_cast<int>(values.size()))
+                        cfgSetInt(configKey, values[static_cast<size_t>(index)]);
+                }, configKey));
+        };
+
         m_coreItems.push_back(_section(L("系统")));
         m_coreItems.push_back(_toggle(
             L("使用 HLE BIOS"), L("没有 Saturn BIOS 文件时使用内置高层模拟，兼容性较低"), 0xE8B5,
             []() { return cfgGetBool("core.saturn.emulated_bios", false); },
             [](bool value) { cfgSetBool("core.saturn.emulated_bios", value); }, "core.saturn.emulated_bios"));
+        intSelector(
+            L("卡带"), L("部分游戏需要扩展内存或 ROM 卡带"), 0xE8FF,
+            "core.saturn.cartridge", 0,
+            // USB Dev (11) is left out on purpose: the core has no path for its
+            // image and degrades the type to "无" (cs0.c in yabause).
+            {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+            {L("无"), L("Pro Action Replay"), L("4M 备份内存"), L("8M 备份内存"),
+             L("16M 备份内存"), L("32M 备份内存"), L("8M 扩展内存"), L("32M 扩展内存"),
+             L("NetLink"), L("ROM 卡带"), L("日本调制解调器")});
+        intSelector(
+            L("主机区域"), L("自动检测失败时可手动指定主机区域"), 0xE8FF,
+            "core.saturn.region", 0,
+            {0, 1, 2, 4, 5, 6, 10, 12, 13},
+            {L("自动检测"), L("日本"), L("亚洲 NTSC"), L("北美"), L("中南美 NTSC"),
+             L("韩国"), L("亚洲 PAL"), L("欧洲"), L("中南美 PAL")});
         m_coreItems.push_back(_selector(
+            L("视频制式"), L("需与游戏区域匹配"), 0xE8FF,
+            {L("NTSC"), L("PAL")},
+            []() { return std::clamp(cfgGetInt("core.saturn.video_format", 0), 0, 1); },
+            [](int value) { cfgSetInt("core.saturn.video_format", std::clamp(value, 0, 1)); },
+            "core.saturn.video_format"));
+
+        m_coreItems.push_back(_section(L("图形")));
+        intSelector(
             L("渲染分辨率"), L("原生分辨率最稳定；更高倍率会增加 GPU 负担"), 0xE8FF,
-            {L("原生"), "4x", "2x", L("原始输出")},
-            []() { return std::clamp(cfgGetInt("core.saturn.resolution_mode", 0), 0, 3); },
-            [](int value) { cfgSetInt("core.saturn.resolution_mode", std::clamp(value, 0, 3)); }, "core.saturn.resolution_mode"));
+            "core.saturn.resolution_mode", 0,
+            {0, 5, 4, 1, 2, 3},
+            {L("原生"), L("1080p"), L("720p"), "4x", "2x", L("原始输出")});
+        intSelector(
+            L("RBG 分辨率"), L("调整 RBG 图层的内部分辨率"), 0xE8FF,
+            "core.saturn.rbg_resolution", 0,
+            {0, 1, 2, 3, 4},
+            {L("原始输出"), "2x", L("720p"), L("1080p"), L("跟随内部分辨率")});
+        m_coreItems.push_back(_selector(
+            L("视频滤镜"), L("FXAA / 扫描线 / 双线性过滤"), 0xE8FF,
+            {L("无"), "FXAA", L("扫描线"), L("双线性")},
+            []() { return std::clamp(cfgGetInt("core.saturn.video_filter", 0), 0, 3); },
+            [](int value) { cfgSetInt("core.saturn.video_filter", std::clamp(value, 0, 3)); },
+            "core.saturn.video_filter"));
+        intSelector(
+            L("多边形生成"), L("透视校正兼容性最好，GPU 计算光栅最快"), 0xE8FF,
+            "core.saturn.polygon_generation", 0,
+            {0, 1, 2, 3},
+            {L("透视校正"), L("CPU 细分"), L("GPU 细分"), L("GPU 计算光栅")});
+        m_coreItems.push_back(_selector(
+            L("宽高比"), L("调整画面缩放比例"), 0xE8FF,
+            {L("原始"), "4:3", "16:9", L("全屏")},
+            []() { return std::clamp(cfgGetInt("core.saturn.aspect_ratio", 0), 0, 3); },
+            [](int value) { cfgSetInt("core.saturn.aspect_ratio", std::clamp(value, 0, 3)); },
+            "core.saturn.aspect_ratio"));
+        m_coreItems.push_back(_toggle(
+            L("旋转屏幕"), L("适用于纵版射击游戏"), 0xE8FF,
+            []() { return cfgGetBool("core.saturn.rotate_screen", false); },
+            [](bool value) { cfgSetBool("core.saturn.rotate_screen", value); },
+            "core.saturn.rotate_screen"));
+        m_coreItems.push_back(_toggle(
+            L("自动跳帧"), L("帧率不足时自动跳帧"), 0xE8E5,
+            []() { return cfgGetBool("core.saturn.frame_skip", false); },
+            [](bool value) { cfgSetBool("core.saturn.frame_skip", value); },
+            "core.saturn.frame_skip"));
+        intSelector(
+            L("帧率限制"), L("正常 / 2 倍 / 无限制"), 0xE8E5,
+            "core.saturn.frame_limit", 0,
+            {0, 2, 1},
+            {L("正常"), "2x", L("无限制")});
+
+        m_coreItems.push_back(_section(L("音频")));
+        intSelector(
+            L("音频引擎"), L("新版音质更好，旧版兼容性更高"), 0xE8D5,
+            "core.saturn.sound_engine", 1,
+            {1, 0},
+            {L("新版"), L("旧版")});
+        intSelector(
+            L("SCSP 同步模式"), L("CPU 时间更精确，实时模式更不容易爆音"), 0xE8D5,
+            "core.saturn.scsp_sync_time_mode", 1,
+            {0, 1},
+            {L("CPU 时间"), L("实时")});
+        intSelector(
+            L("SCSP 每帧同步次数"), L("数值越大音频越平滑但越耗性能"), 0xE8D5,
+            "core.saturn.scsp_sync_per_frame", 1,
+            {1, 2, 4, 8},
+            {"1", "2", "4", "8"});
+
+        m_coreItems.push_back(_section(L("性能与兼容")));
+        intSelector(
+            L("CPU 同步/行"), L("每行同步点数量，越多越精确也越慢"), 0xE8E5,
+            "core.saturn.cpu_sync_per_line", 1,
+            {1, 2, 4, 8},
+            {L("速度 (1)"), L("平衡 (2)"), L("精确 (4)"), L("最精确 (8)")});
+        m_coreItems.push_back(_toggle(
+            L("扩展内部内存"), L("启用 4MB 扩展内存，部分游戏需要"), 0xE8E5,
+            []() { return cfgGetBool("core.saturn.extend_internal_memory", false); },
+            [](bool value) { cfgSetBool("core.saturn.extend_internal_memory", value); },
+            "core.saturn.extend_internal_memory"));
+
         m_coreItems.push_back(_section(L("按键")));
         m_coreItems.push_back(_action(
-            L("Saturn 按键映射"), L("Switch A/B/X/Y/L/R/ZL/ZR 对应 Saturn 六键手柄"), 0xE30F,
+            L("Saturn 按键映射"),
+            L("同名一一对应：Saturn A = A、L = L 等；C/Z 用 ZR/ZL"), 0xE30F,
             []() { return std::string(L("进入配置  >")); },
             [this]() { _openMappingPage(L("Saturn 按键映射"), "saturn.", false); }));
         _finishCorePage(L("YabaSanshiro 核心设置"));
@@ -2847,10 +3598,6 @@ private:
     void _openDolphinCore()
     {
         m_coreItems.clear();
-        m_coreItems.push_back(_section(L("外部核心")));
-        _appendExternalCorePaths(
-            "Dolphin", "dolphin.externalNro.path", "/GBAStation/core/GBAStationDolphinStub.nro",
-            "dolphin.externalNro.returnPath");
         m_coreItems.push_back(_section(L("GameCube / Wii")));
         m_coreItems.push_back(_toggle(
             L("宽屏"), L("为支持的 GameCube 和 Wii 游戏启用宽屏补丁"), 0xE3F4,
@@ -2865,6 +3612,35 @@ private:
         m_coreItems.push_back(_selector(
             L("Wii 控制器"), L("第一阶段使用 Classic Controller 模拟，不启用体感"), 0xE30F,
             {L("Classic Controller")}, []() { return 0; }, [](int) {}, "core.dolphin.dolphin_wiimote1_mode"));
+        _appendExternalOptions("dolphin", {
+            {"系统", "dolphin_skip_gc_bios", "跳过 GameCube BIOS", "disabled"},
+            {"系统", "dolphin_language", "系统语言", "1"},
+            {"系统", "dolphin_progressive_scan", "逐行扫描", "enabled"},
+            {"系统", "dolphin_pal60", "PAL60", "disabled"},
+            {"性能", "dolphin_cpu_clock_rate", "CPU 频率倍率", "1.0"},
+            {"性能", "dolphin_emulation_speed", "模拟速度", "1.0"},
+            {"性能", "dolphin_fast_disc_speed", "光盘读取加速", "disabled"},
+            {"性能", "dolphin_sync_gpu", "GPU 同步", "disabled"},
+            {"性能", "dolphin_vi_skip", "VI 跳帧", "auto"},
+            {"图形", "dolphin_efb_scale", "内部渲染倍率", "1"},
+            {"图形", "dolphin_anti_aliasing", "抗锯齿", "0"},
+            {"图形", "dolphin_texture_cache_accuracy", "纹理缓存精度", "128"},
+            {"图形", "dolphin_gpu_texture_decoding", "GPU 纹理解码", "disabled"},
+            {"图形", "dolphin_disable_fog", "禁用雾效", "disabled"},
+            {"图形", "dolphin_force_true_color", "强制真彩色", "disabled"},
+            {"图形", "dolphin_shader_compilation_mode", "着色器编译模式", "2"},
+            {"音频", "dolphin_dsp_jit", "DSP JIT", "enabled"},
+            {"音频", "dolphin_audio_latency", "音频延迟(ms)", "80"},
+            {"音频", "dolphin_audio_volume", "音量", "100"},
+            {"调试", "dolphin_log_level", "日志级别", "1"},
+            {"调试", "dolphin_debug_mode_enabled", "调试模式", "disabled"},
+            {"调试", "dolphin_show_fps", "显示 FPS", "disabled"},
+            {"调试", "dolphin_enable_wireframe", "线框模式", "disabled"},
+            {"输入", "dolphin_pointer_yaw", "指针灵敏度角度", "70"},
+            {"输入", "dolphin_wiimote1_source", "Wii Remote 1", "emulated"},
+            {"输入", "dolphin_wiimote1_profile", "Wii Remote 1 配置", "auto"},
+            {"输入", "dolphin_wiimote1_mode", "Wii Remote 1 模式", "classic"},
+        });
         m_coreItems.push_back(_section(L("按键")));
         m_coreItems.push_back(_action(
             L("GC / Wii 按键映射"), L("Dolphin 会根据游戏自动选择 GameCube 或 Wii Classic Controller"), 0xE30F,
@@ -3374,13 +4150,13 @@ private:
                         "PAD_LSB");
             _addBinding(L("倒带"), L("可绑定单键或双键组合"),
                         beiklive::input_mapping::makeKey(prefix, "handle.rewind"),
-                        "none");
-            _addBinding(L("快速保存"), L("可绑定单键或双键组合"),
-                        beiklive::input_mapping::makeKey(prefix, "hotkey.quicksave.pad"),
-                        "none");
-            _addBinding(L("快速读取"), L("可绑定单键或双键组合"),
-                        beiklive::input_mapping::makeKey(prefix, "hotkey.quickload.pad"),
-                        "none");
+                        "PAD_RSB");
+            // _addBinding(L("快速保存"), L("可绑定单键或双键组合"),
+            //             beiklive::input_mapping::makeKey(prefix, "hotkey.quicksave.pad"),
+            //             "none");
+            // _addBinding(L("快速读取"), L("可绑定单键或双键组合"),
+            //             beiklive::input_mapping::makeKey(prefix, "hotkey.quickload.pad"),
+            //             "none");
             m_mappingFocus = _firstFocusable(m_mappingItems);
             m_mappingScroll = m_mappingTargetScroll = 0.f;
             return;
@@ -3391,6 +4167,7 @@ private:
         for (const auto& entry : beiklive::input_mapping::kGameButtonDefaults)
         {
             if ((entry.platformMask & mask) == 0) continue;
+            if (!beiklive::input_mapping::showsGameButtonForPrefix(prefix, entry)) continue;
             _addBinding(beiklive::input_mapping::gameButtonLabelForPrefix(prefix, entry),
                         L("游戏内对应按键"),
                         beiklive::input_mapping::makeHandleKey(prefix, entry.suffix),
@@ -3413,7 +4190,19 @@ private:
                 if ((nds && entry.hiddenOnNds) ||
                     (prefix == "3ds." && entry.hiddenOnThreeDs))
                     continue;
-                _addBinding(entry.label, L("右摇杆控制指针；麦克风热键再次按下可取消"), beiklive::input_mapping::makeKey(prefix, entry.key), entry.defaultValue);
+                _addBinding(entry.label, pointerHotkeyHint(entry.key),
+                            beiklive::input_mapping::makeKey(prefix, entry.key),
+                            entry.defaultValue);
+            }
+        }
+        if (nds)
+        {
+            m_mappingItems.push_back(_section(L("NDS 特殊功能")));
+            for (const auto& entry : beiklive::input_mapping::kNdsSpecialHotkeys)
+            {
+                _addBinding(entry.label, pointerHotkeyHint(entry.key),
+                            beiklive::input_mapping::makeKey(prefix, entry.key),
+                            entry.defaultValue);
             }
         }
         if (beiklive::input_mapping::showsTurboBindingsForPrefix(prefix))
@@ -3453,6 +4242,8 @@ private:
 
     std::vector<NanoSettingItem>& _activeItems()
     {
+        if (m_coreSettingsOverlay) return m_coreItems;
+        if (m_coreBrowserMode != CoreBrowserMode::None) return m_coreBrowserItems;
         if (m_inMapping) return m_mappingItems;
         if (m_inCore) return m_coreItems;
         return m_categories[static_cast<size_t>(m_category)].items;
@@ -3460,6 +4251,8 @@ private:
 
     int& _activeFocus()
     {
+        if (m_coreSettingsOverlay) return m_coreFocus;
+        if (m_coreBrowserMode != CoreBrowserMode::None) return m_coreBrowserFocus;
         if (m_inMapping) return m_mappingFocus;
         if (m_inCore) return m_coreFocus;
         return m_focus[static_cast<size_t>(m_category)];
@@ -3467,6 +4260,8 @@ private:
 
     float& _activeScroll()
     {
+        if (m_coreSettingsOverlay) return m_coreScroll;
+        if (m_coreBrowserMode != CoreBrowserMode::None) return m_coreBrowserScroll;
         if (m_inMapping) return m_mappingScroll;
         if (m_inCore) return m_coreScroll;
         return m_scroll[static_cast<size_t>(m_category)];
@@ -3474,6 +4269,8 @@ private:
 
     float& _activeTargetScroll()
     {
+        if (m_coreSettingsOverlay) return m_coreTargetScroll;
+        if (m_coreBrowserMode != CoreBrowserMode::None) return m_coreBrowserTargetScroll;
         if (m_inMapping) return m_mappingTargetScroll;
         if (m_inCore) return m_coreTargetScroll;
         return m_targetScroll[static_cast<size_t>(m_category)];
@@ -3522,6 +4319,24 @@ private:
         auto& items = _activeItems();
         if (items.empty()) return;
         int index = _activeFocus();
+        if (m_coreBrowserMode != CoreBrowserMode::None && !m_coreSettingsOverlay)
+        {
+            const int count = static_cast<int>(items.size());
+            if (index < 0 || index >= count)
+                return;
+            const int step = direction < 0 ? -1 : 1;
+            int next = index;
+            for (int attempt = 0; attempt < count; ++attempt)
+            {
+                next = (next + step + count) % count;
+                if (items[static_cast<size_t>(next)].kind != NanoSettingKind::Section)
+                    break;
+            }
+            _activeFocus() = next;
+            _ensureFocusedVisible();
+            brls::Application::getAudioPlayer()->play(brls::SOUND_FOCUS_CHANGE);
+            return;
+        }
         for (int attempt = 0; attempt < static_cast<int>(items.size()); ++attempt)
         {
             index = (index + (direction < 0 ? -1 : 1) + static_cast<int>(items.size())) % static_cast<int>(items.size());
@@ -3537,6 +4352,15 @@ private:
 
     void _adjust(int direction)
     {
+        if (m_coreBrowserMode == CoreBrowserMode::Management)
+        {
+            m_coreBrowserFilter = (m_coreBrowserFilter + (direction < 0 ? 5 : 1)) % 6;
+            _buildCoreBrowserItems();
+            m_coreBrowserFocus = _firstFocusable(m_coreBrowserItems);
+            m_coreBrowserScroll = m_coreBrowserTargetScroll = 0.f;
+            invalidate();
+            return;
+        }
         if (m_steamDialog == SteamDialog::ApiInfo ||
             m_steamDialog == SteamDialog::ApiModify ||
             m_steamDialog == SteamDialog::ConfirmCacheClear) {
@@ -3552,6 +4376,14 @@ private:
     {
         if (m_closing || m_selectorOpen || m_steamDialog != SteamDialog::None ||
             m_categoryMotion < 0.68f) return;
+        if (m_coreBrowserMode != CoreBrowserMode::None)
+        {
+            m_coreBrowserMode = CoreBrowserMode::None;
+            m_coreBrowserItems.clear();
+            m_contentEntrance = 0.f;
+            brls::Application::getAudioPlayer()->play(brls::SOUND_BACK);
+            return;
+        }
         if (m_inMapping)
         {
             m_inMapping = false;
@@ -3592,6 +4424,7 @@ private:
         {
         case NanoSettingKind::Toggle:
         case NanoSettingKind::Action:
+        case NanoSettingKind::TextValue:
             if (item.activate) item.activate();
             break;
         case NanoSettingKind::Selector:
@@ -3670,6 +4503,33 @@ private:
             brls::Application::getAudioPlayer()->play(brls::SOUND_BACK);
             return;
         }
+        if (m_coreBrowserMode != CoreBrowserMode::None)
+        {
+            if (m_coreSettingsOverlay)
+            {
+                m_coreSettingsOverlay = false;
+                m_inCore = false;
+                m_coreItems.clear();
+                _buildCoreBrowserItems();
+                m_contentEntrance = 0.f;
+                brls::Application::getAudioPlayer()->play(brls::SOUND_BACK);
+                return;
+            }
+            if (m_coreBrowserMode == CoreBrowserMode::Platform)
+            {
+                m_coreBrowserMode = m_coreBrowserParent;
+                m_coreBrowserPlatform = -1;
+                _buildCoreBrowserItems();
+            }
+            else
+            {
+                m_coreBrowserMode = CoreBrowserMode::None;
+                m_coreBrowserItems.clear();
+            }
+            m_contentEntrance = 0.f;
+            brls::Application::getAudioPlayer()->play(brls::SOUND_BACK);
+            return;
+        }
         if (m_inMapping)
         {
             m_inMapping = false;
@@ -3681,6 +4541,9 @@ private:
         {
             m_inCore = false;
             m_coreItems.clear();
+            m_coreSettingsOverlay = false;
+            m_coreBrowserMode = CoreBrowserMode::Platform;
+            _buildCoreBrowserItems();
             m_contentEntrance = 0.f;
             brls::Application::getAudioPlayer()->play(brls::SOUND_BACK);
             return;
@@ -3697,8 +4560,16 @@ private:
     float _focusOffset() const
     {
         const auto& items = const_cast<NanoSettingsCanvas*>(this)->_activeItems();
+        constexpr float childListInset = 6.f;
+        if (m_coreBrowserMode != CoreBrowserMode::None && !m_coreSettingsOverlay)
+        {
+            if (m_coreBrowserFocus >= 0 &&
+                m_coreBrowserFocus < static_cast<int>(m_coreBrowserCardOffsets.size()))
+                return childListInset + m_coreBrowserCardOffsets[static_cast<size_t>(m_coreBrowserFocus)];
+            return childListInset;
+        }
         const int focus = m_inMapping ? m_mappingFocus : (m_inCore ? m_coreFocus : m_focus[static_cast<size_t>(m_category)]);
-        float offset = 0.f;
+        float offset = m_coreSettingsOverlay ? childListInset : 0.f;
         for (int i = 0; i < focus && i < static_cast<int>(items.size()); ++i)
             offset += _itemHeight(items[static_cast<size_t>(i)]) + 8.f;
         return offset;
@@ -3707,7 +4578,10 @@ private:
     float _contentHeight() const
     {
         const auto& items = const_cast<NanoSettingsCanvas*>(this)->_activeItems();
-        float height = 18.f;
+        constexpr float childListInset = 6.f;
+        if (m_coreBrowserMode != CoreBrowserMode::None && !m_coreSettingsOverlay)
+            return childListInset + m_coreBrowserContentHeight;
+        float height = m_coreSettingsOverlay ? 18.f + childListInset : 18.f;
         for (const auto& item : items)
             height += _itemHeight(item) + 8.f;
         return height;
@@ -3715,9 +4589,21 @@ private:
 
     void _ensureFocusedVisible()
     {
-        constexpr float viewport = 470.f;
+        const float viewport = std::max(1.f, m_coreBrowserViewport);
         const float top = _focusOffset();
         const auto& items = const_cast<NanoSettingsCanvas*>(this)->_activeItems();
+        if (m_coreBrowserMode != CoreBrowserMode::None && !m_coreSettingsOverlay)
+        {
+            float& target = _activeTargetScroll();
+            // Leave room for the vendor header above the first row. Using the
+            // old 18px margin left the first group title half-clipped after
+            // returning from the bottom of the list.
+            constexpr float topMargin = 34.f;
+            if (top < target + topMargin) target = std::max(0.f, top - topMargin);
+            if (top + 68.f > target + viewport - 18.f) target = top + 68.f - viewport + 18.f;
+            target = std::clamp(target, 0.f, std::max(0.f, _contentHeight() - viewport));
+            return;
+        }
         const int focus = m_inMapping ? m_mappingFocus : (m_inCore ? m_coreFocus : m_focus[static_cast<size_t>(m_category)]);
         const float height = items.empty() ? 0.f : _itemHeight(items[static_cast<size_t>(focus)]);
         float& target = _activeTargetScroll();
@@ -3761,8 +4647,13 @@ private:
         nvgText(vg, x + 36.f, y + 42.f, L("设置").c_str(), nullptr);
         nvgFontSize(vg, 15.f);
         nvgFillColor(vg, settingSecondary(0.72f));
-        const std::string subtitle = m_inMapping ? m_mappingTitle :
-            (m_inCore ? m_coreTitle : L("模拟器、输入、游戏与系统选项"));
+        std::string subtitle;
+        if (m_inMapping) subtitle = m_mappingTitle;
+        else if (m_inCore) subtitle = m_coreTitle;
+        else if (m_coreBrowserMode == CoreBrowserMode::Management) subtitle = L("核心管理");
+        else if (m_coreBrowserMode == CoreBrowserMode::Platform)
+            subtitle = L("游戏平台核心");
+        else subtitle = L("模拟器、输入、游戏与系统选项");
         nvgText(vg, x + 36.f, y + 70.f, subtitle.c_str(), nullptr);
 
         const float startX = x + 238.f;
@@ -3808,6 +4699,119 @@ private:
 
     void _drawContent(NVGcontext* vg, float x, float y, float w, float h)
     {
+        if (m_coreBrowserMode != CoreBrowserMode::None)
+        {
+            const float panelW = w;
+            const float panelH = h;
+            const Rect panel{x, y, panelW, panelH};
+            nvgFontFaceId(vg, m_defaultFont);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgFontSize(vg, 22.f);
+            nvgFillColor(vg, settingText(0.96f));
+            const std::string title = m_coreSettingsOverlay ? m_coreTitle
+                : (m_coreBrowserMode == CoreBrowserMode::Management ? L("核心管理") : L("游戏平台核心"));
+            nvgText(vg, panel.x + 24.f, panel.y + 31.f, title.c_str(), nullptr);
+            nvgFontSize(vg, 14.f);
+            nvgFillColor(vg, settingSecondary(0.78f));
+            const std::string browserHint = m_coreSettingsOverlay ? L("调整当前核心的运行选项")
+                : (m_coreBrowserMode == CoreBrowserMode::Platform ? L("选择一个核心查看其详细设置") : L("按平台浏览并配置模拟器核心"));
+            nvgText(vg, panel.x + 24.f, panel.y + 55.f,
+                    browserHint.c_str(), nullptr);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, panel.x + 24.f, panel.y + 70.f);
+            nvgLineTo(vg, panel.x + panel.w - 24.f, panel.y + 70.f);
+            nvgStrokeColor(vg, settingBorder(0.22f));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            const float innerX = panel.x + 12.f;
+            const float innerY = panel.y + 86.f;
+            const float innerW = panel.w - 24.f;
+            const float innerH = panel.h - 118.f;
+            nvgSave(vg);
+            // Keep cards and vendor headers inside the content viewport. The
+            // previous four-pixel expansion allowed the first row to paint
+            // over the panel header while the scroll animation was settling.
+            nvgIntersectScissor(vg, innerX, innerY, innerW, innerH);
+            m_coreBrowserViewport = std::max(1.f, innerH);
+            auto& items = m_coreSettingsOverlay ? m_coreItems : m_coreBrowserItems;
+            constexpr float childListInset = 6.f;
+            if (m_coreSettingsOverlay)
+            {
+                float cursor = innerY + childListInset - m_coreScroll;
+                for (int i = 0; i < static_cast<int>(items.size()); ++i)
+                {
+                    const auto& item = items[static_cast<size_t>(i)];
+                    const float itemH = _itemHeight(item);
+                    if (cursor + itemH >= innerY && cursor <= innerY + innerH)
+                    {
+                        if (item.kind == NanoSettingKind::Section)
+                            _drawSection(vg, item, innerX + 8.f, cursor, innerW - 16.f, itemH);
+                        else
+                            _drawItem(vg, item, i, i == m_coreFocus,
+                                      innerX + childListInset, cursor,
+                                      innerW - childListInset * 2.f, itemH);
+                    }
+                    cursor += itemH + 8.f;
+                }
+                nvgRestore(vg);
+                nvgFontFaceId(vg, m_defaultFont);
+                nvgFontSize(vg, 14.f);
+                nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, settingSecondary(0.72f));
+                const std::string coreFooter = L("方向键选择  ·  A 确认  ·  B 返回");
+                nvgText(vg, panel.x + panel.w - 24.f, panel.y + panel.h - 20.f,
+                        coreFooter.c_str(), nullptr);
+                return;
+            }
+            if (m_coreBrowserMode == CoreBrowserMode::Management && !m_coreSettingsOverlay)
+                _drawCoreBrowserFilter(vg, panel.x + 250.f, panel.y + 10.f,
+                                       std::max(180.f, panel.w - 274.f));
+            const float offsetY = 0.f;
+            // Keep a small horizontal breathing room so the focus glow and
+            // shadow are not clipped by the content scissor.
+            const float cardW = innerW - 12.f;
+            const float cardH = 76.f;
+            int previousGroup = -1;
+            for (int i = 0; i < static_cast<int>(items.size()); ++i)
+            {
+                const int group = (m_coreBrowserMode == CoreBrowserMode::Management &&
+                                   i < static_cast<int>(m_coreBrowserGroups.size()))
+                    ? m_coreBrowserGroups[static_cast<size_t>(i)] : -1;
+                if (m_coreBrowserMode == CoreBrowserMode::Management && group != previousGroup)
+                {
+                    nvgFontFaceId(vg, m_defaultFont);
+                    nvgFontSize(vg, 18.f);
+                    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(vg, settingText(0.92f));
+                    const float titleY = innerY + childListInset
+                        + m_coreBrowserCardOffsets[static_cast<size_t>(i)]
+                        - 17.f - _activeScroll();
+                    nvgText(vg, innerX + 4.f,
+                            titleY,
+                            L(_coreVendorTitle(group)).c_str(), nullptr);
+                    previousGroup = group;
+                }
+                const float cardX = innerX + 6.f;
+                const float cardY = innerY + childListInset + offsetY
+                    + m_coreBrowserCardOffsets[static_cast<size_t>(i)] - _activeScroll();
+                if (cardY + cardH < innerY || cardY > innerY + innerH)
+                    continue;
+                _drawItem(vg, items[static_cast<size_t>(i)], i == _activeFocus() ? i : -1,
+                          i == _activeFocus(), cardX, cardY, cardW, cardH);
+            }
+            nvgRestore(vg);
+            nvgFontFaceId(vg, m_defaultFont);
+            nvgFontSize(vg, 14.f);
+            nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, settingSecondary(0.72f));
+            const std::string browserFooter = m_coreBrowserMode == CoreBrowserMode::Management
+                ? L("方向键选择  ·  A 进入平台  ·  B 返回模拟器")
+                : L("方向键选择  ·  A 查看设置  ·  B 返回核心管理");
+            nvgText(vg, panel.x + panel.w - 24.f, panel.y + panel.h - 20.f,
+                    browserFooter.c_str(), nullptr);
+            return;
+        }
         auto& items = _activeItems();
         const int focus = _activeFocus();
         const float transition = settingBack(m_contentEntrance);
@@ -3845,6 +4849,73 @@ private:
         nvgFillColor(vg, settingMuted(0.60f));
             nvgFill(vg);
         }
+    }
+
+    void _drawCoreBrowserFilter(NVGcontext* vg, float x, float y, float w)
+    {
+        static const char* labels[] = {"全部平台", "任天堂系", "世嘉系", "索尼系", "街机类", "其他平台"};
+        const float itemW = w / 6.f;
+        for (int i = 0; i < 6; ++i)
+        {
+            const bool selected = i == m_coreBrowserFilter;
+            const Rect r{x + i * itemW + 3.f, y, itemW - 6.f, 40.f};
+            if (selected)
+            {
+                _drawExternalShadow(vg, r, 20.f, 0.8f);
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, r.x, r.y, r.w, r.h, 20.f);
+                nvgFillColor(vg, settingPanelSubtle(0.14f));
+                nvgFill(vg);
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, r.x + 1.f, r.y + 1.f, r.w - 2.f, r.h - 2.f, 19.f);
+                nvgStrokeColor(vg, settingBorder(0.42f));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+            }
+            nvgFontFaceId(vg, m_defaultFont);
+            nvgFontSize(vg, selected ? 17.f : 16.f);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, selected ? settingText() : settingMuted(0.72f));
+            nvgText(vg, r.x + r.w * 0.5f, r.y + r.h * 0.5f, L(labels[i]).c_str(), nullptr);
+        }
+    }
+
+    void _drawCoreBrowserCard(NVGcontext* vg, const NanoSettingItem& item,
+                              bool focused, float x, float y, float w, float h)
+    {
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x, y, w, h, 6.f);
+        nvgFillColor(vg, focused ? nvgRGBA(9, 71, 113, 255) : nvgRGBA(37, 37, 38, 255));
+        nvgFill(vg);
+        if (focused)
+        {
+            beiklive::ui::drawGradientFocusBorder(vg, x, y, w, h, 6.f, 2.f, 1.f,
+                beiklive::ui::gradientFocusAnimationOffset(m_time));
+        }
+        else
+        {
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, x + 0.5f, y + 0.5f, w - 1.f, h - 1.f, 5.5f);
+            nvgStrokeColor(vg, nvgRGBA(60, 60, 60, 255));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+        }
+
+        nvgFontFaceId(vg, m_materialFont);
+        nvgFontSize(vg, 22.f);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor(vg, focused ? nvgRGBA(220, 235, 245, 255) : nvgRGBA(190, 190, 190, 255));
+        const std::string icon = settingIconUtf8(item.icon);
+        nvgText(vg, x + 24.f, y + h * 0.5f, icon.c_str(), nullptr);
+
+        nvgFontFaceId(vg, m_defaultFont);
+        nvgFontSize(vg, focused ? 16.f : 15.f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor(vg, focused ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(212, 212, 212, 255));
+        nvgText(vg, x + 46.f, y + 27.f, L(item.title).c_str(), nullptr);
+        nvgFontSize(vg, 12.f);
+        nvgFillColor(vg, nvgRGBA(158, 158, 158, 255));
+        nvgTextBox(vg, x + 46.f, y + 42.f, w - 56.f, L(item.hint).c_str(), nullptr);
     }
 
     void _drawSection(NVGcontext* vg, const NanoSettingItem& item,
@@ -3932,13 +5003,19 @@ private:
             _drawToggle(vg, value == L("开启"), x + w - 78.f, y + h * 0.5f, focused);
         else
         {
+            const bool isCurrentCore = item.kind == NanoSettingKind::Action
+                && value == L("当前核心");
             nvgFontFaceId(vg, m_defaultFont);
             nvgFontSize(vg, focused ? 20.f : 18.f);
             nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
             nvgFillColor(vg, focused ? nvgRGBA(0, 102, 204, 255) : settingSecondary(0.88f));
-            nvgText(vg, x + w - 39.f, y + h * 0.5f, L(value).c_str(), nullptr);
-            nvgFontSize(vg, 22.f);
-            nvgText(vg, x + w - 17.f, y + h * 0.5f, ">", nullptr);
+            nvgText(vg, x + w - (isCurrentCore ? 24.f : 39.f), y + h * 0.5f,
+                    L(value).c_str(), nullptr);
+            if (!isCurrentCore)
+            {
+                nvgFontSize(vg, 22.f);
+                nvgText(vg, x + w - 17.f, y + h * 0.5f, ">", nullptr);
+            }
         }
         nvgRestore(vg);
     }
@@ -4076,7 +5153,7 @@ private:
         float cursor = x + w - 32.f;
         const float hintY = y + h - 29.f;
         _drawHint(vg, brls::BUTTON_B,
-                  m_selectorOpen ? L("取消").c_str() : (m_inMapping ? L("返回平台").c_str() : (m_inCore ? L("返回核心").c_str() : L("返回").c_str())),
+                  m_selectorOpen ? L("取消").c_str() : (m_inMapping ? L("返回平台").c_str() : (m_inCore ? L("返回核心").c_str() : (m_coreBrowserMode == CoreBrowserMode::Platform ? L("返回核心管理").c_str() : (m_coreBrowserMode != CoreBrowserMode::None ? L("返回模拟器").c_str() : L("返回").c_str())))),
                   cursor, hintY);
         if (m_inMapping && !m_selectorOpen && !m_mappingItems.empty()
             && m_mappingItems[static_cast<size_t>(m_mappingFocus)].kind == NanoSettingKind::Binding)
@@ -4085,7 +5162,12 @@ private:
             && m_coreItems[static_cast<size_t>(m_coreFocus)].reset)
             _drawHint(vg, brls::BUTTON_BACK, L("恢复默认").c_str(), cursor, hintY);
         _drawHint(vg, brls::BUTTON_A, m_selectorOpen ? L("确认").c_str() : L("选择").c_str(), cursor, hintY);
-        if (!m_inMapping && !m_inCore && !m_selectorOpen)
+        if (m_coreBrowserMode == CoreBrowserMode::Management && !m_selectorOpen)
+        {
+            _drawHint(vg, brls::BUTTON_RB, L("下一分类").c_str(), cursor, hintY);
+            _drawHint(vg, brls::BUTTON_LB, L("上一分类").c_str(), cursor, hintY);
+        }
+        if (!m_inMapping && !m_inCore && !m_selectorOpen && m_coreBrowserMode == CoreBrowserMode::None)
         {
             _drawHint(vg, brls::BUTTON_RB, L("下一类").c_str(), cursor, hintY);
             _drawHint(vg, brls::BUTTON_LB, L("上一类").c_str(), cursor, hintY);
@@ -4393,15 +5475,6 @@ brls::View *SettingPage::buildUITab()
 
     // ── 存档设置 ──────────────────────────────────────────────────────────────
     box->addView(makeHeader(L("存档设置")));
-
-    {
-        std::vector<std::string> saveDirs = {L("ROM 所在目录"), L("模拟器目录")};
-        std::string curSram = cfgGetStr("save.sramDir", "");
-        auto *sramDirCell = new brls::SelectorCell();
-        sramDirCell->init(L("SRAM 存档目录"), saveDirs, curSram.empty() ? 0 : 1,
-                          [](int idx) { cfgSetStr("save.sramDir", idx == 0 ? "" : beiklive::path::savePath()); });
-        box->addView(sramDirCell);
-    }
 
     auto *autoSaveCell = new brls::SelectorCell();
     {
@@ -4746,17 +5819,6 @@ brls::View *SettingPage::buildDisplayTab()
         box->addView(makeHint(L("画面模式为整数倍时生效，自动=取最大整数倍")));
     }
 
-    {
-        std::vector<std::string> filters = {L("像素风格 (Nearest)"), L("平滑 (Linear)")};
-        std::string curFilter = cfgGetStr("display.filter", "nearest");
-        int idx = (curFilter == "linear") ? 1 : 0;
-        auto *cell = new brls::SelectorCell();
-        cell->init(L("纹理过滤"), filters, idx,
-                   [](int i) { cfgSetStr("display.filter", i == 1 ? "linear" : "nearest"); });
-        box->addView(cell);
-        box->addView(makeHint(L("Nearest 像素点阵风格（锐利）| Linear 平滑柔和（模糊）")));
-    }
-
     auto *ffOverlayCell = new brls::BooleanCell();
     ffOverlayCell->init("显示快进覆盖层", cfgGetBool("display.showFfOverlay", true),
                          [](bool v) { cfgSetBool("display.showFfOverlay", v); });
@@ -4867,6 +5929,18 @@ brls::View *SettingPage::buildAudioTab()
     box->addView(sfxCell);
 
     {
+        std::vector<std::string> opts = {L("静音"), "25%", "50%", "75%", "100%"};
+        static const int vals[] = {0, 25, 50, 75, 100};
+        int cur = cfgGetInt(beiklive::SettingKey::KEY_AUDIO_BUTTON_SFX_VOLUME, 100);
+        int idx = 4;
+        for (int i = 0; i < 5; ++i) if (vals[i] == cur) { idx = i; break; }
+        auto *cell = new brls::SelectorCell();
+        cell->init(L("按键音效音量"), opts, idx,
+                   [](int i) { if (i >= 0 && i < 5) cfgSetInt(beiklive::SettingKey::KEY_AUDIO_BUTTON_SFX_VOLUME, vals[i]); });
+        box->addView(cell);
+    }
+
+    {
         std::vector<std::string> opts = {"60 ms", "90 ms", "120 ms", "160 ms"};
         static const int vals[] = {60, 90, 120, 160};
         int cur = cfgGetInt(beiklive::SettingKey::KEY_AUDIO_TARGET_LATENCY_MS, 90);
@@ -4953,10 +6027,8 @@ brls::View *SettingPage::buildAudioTab()
     return container;
 }
 
-namespace
+void registerKeyBindActions(beiklive::DetailCell* cell, const std::string& cfgKey)
 {
-    void registerKeyBindActions(beiklive::DetailCell* cell, const std::string& cfgKey)
-    {
         cell->registerAction(L("确认"), brls::BUTTON_A,
             [cell, cfgKey](brls::View*) {
                 openKeyCapture([cell, cfgKey](const std::string& r) {
@@ -5008,6 +6080,8 @@ namespace
         {
             if ((entry.platformMask & platformMask) == 0)
                 continue;
+            if (!beiklive::input_mapping::showsGameButtonForPrefix(prefix, entry))
+                continue;
             std::string cfgKey = beiklive::input_mapping::makeHandleKey(prefix, entry.suffix);
             auto* cell = new beiklive::DetailCell();
             cell->setLeftTextSize(18.f);
@@ -5047,9 +6121,22 @@ namespace
                 cell->setRightText(cfgGetStr(cfgKey, entry.defaultValue));
                 registerKeyBindActions(cell, cfgKey);
                 box->addView(cell);
+                box->addView(makeHint(pointerHotkeyHint(entry.key)));
             }
-            box->addView(makeHint(L("切换为指针模式后使用右摇杆控制指针")));
-            box->addView(makeHint(L("模拟麦克风输入：按下热键后持续输入静态噪声，再按一次取消")));
+        }
+        if (nds)
+        {
+            box->addView(makeHeader(L("NDS 特殊功能")));
+            for (const auto& entry : beiklive::input_mapping::kNdsSpecialHotkeys)
+            {
+                std::string cfgKey = beiklive::input_mapping::makeKey(prefix, entry.key);
+                auto* cell = new beiklive::DetailCell();
+                cell->setLeftText(std::string(entry.label));
+                cell->setRightText(cfgGetStr(cfgKey, entry.defaultValue));
+                registerKeyBindActions(cell, cfgKey);
+                box->addView(cell);
+                box->addView(makeHint(pointerHotkeyHint(entry.key)));
+            }
         }
 
         if (beiklive::input_mapping::showsTurboBindingsForPrefix(prefix))
@@ -5112,7 +6199,6 @@ namespace
         HIDE_BRLS_BAR(frame);
         beiklive::pushActivity(frame, parent, page);
     }
-}
 
 brls::View *SettingPage::buildKeyBindTab()
 {

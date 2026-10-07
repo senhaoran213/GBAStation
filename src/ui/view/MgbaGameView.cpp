@@ -300,7 +300,10 @@ namespace beiklive
             const auto& presets = beiklive::GetGbColorPresets();
             if (index < 0 || index >= static_cast<int>(presets.size()))
                 return;
-            SET_SETTING_KEY_STR("core.mgba_gb_colors", presets[index]);
+            if (beiklive::SettingManager)
+                beiklive::SettingManager->Set("core.mgba_gb_colors", beiklive::ConfigValue(presets[index]));
+            if (m_gameMenuView)
+                m_gameMenuView->requestConfigSave();
             _onConfigUpdated();
         });
         m_gameMenuView->addCoreDisplaySettingView(colorCell);
@@ -381,6 +384,10 @@ namespace beiklive
 
     MgbaGameView::~MgbaGameView()
     {
+        if (m_displaySettingsSaveDelayId)
+            brls::cancelDelay(m_displaySettingsSaveDelayId);
+        if (m_displaySettingsSavePending)
+            _flushDisplaySettings();
         brls::Logger::debug("[MgbaGameView] destructor: platform={}, path={}",
             m_gameEntry.platform, m_gameEntry.path);
 #ifdef __SWITCH__
@@ -1480,32 +1487,31 @@ namespace beiklive
             }
         }
 
-        // 快进（支持按住/切换两种模式）
+        // 快进（按住/切换模式在按键触发时实时读取配置，菜单修改即时生效）
         {
             std::string val = readMapping("handle.fastforward", "PAD_LSB");
-            std::string mode = GET_SETTING_KEY_STR("fastforward.mode", "hold");
             auto combos = beiklive::tools::parseMultiCombo(val);
-            if (mode == "hold") {
-                for (const auto& combo : combos) {
-                    GameInputManager::instance().registerEmuFunctionKey(
-                        EmuFunctionKey::EMU_FAST_FORWARD, {combo},
-                        []() { GameSignal::instance().requestFastForward(true); },
-                        TriggerType::HOLD);
-                    GameInputManager::instance().registerEmuFunctionKey(
-                        EmuFunctionKey::EMU_FAST_FORWARD, {combo},
-                        []() { GameSignal::instance().requestFastForward(false); },
-                        TriggerType::RELEASE);
-                }
-            } else {
-                for (const auto& combo : combos) {
-                    GameInputManager::instance().registerEmuFunctionKey(
-                        EmuFunctionKey::EMU_FAST_FORWARD, {combo},
-                        []() {
+            for (const auto& combo : combos) {
+                GameInputManager::instance().registerEmuFunctionKey(
+                    EmuFunctionKey::EMU_FAST_FORWARD, {combo},
+                    []() {
+                        std::string mode = GET_SETTING_KEY_STR("fastforward.mode", "hold");
+                        if (mode == "toggle") {
                             bool cur = GameSignal::instance().isFastForward();
                             GameSignal::instance().requestFastForward(!cur);
                             brls::Logger::debug("快进切换：{}", !cur);
-                        });
-                }
+                        } else {
+                            GameSignal::instance().requestFastForward(true);
+                        }
+                    },
+                    TriggerType::PRESS);
+                GameInputManager::instance().registerEmuFunctionKey(
+                    EmuFunctionKey::EMU_FAST_FORWARD, {combo},
+                    []() {
+                        if (GET_SETTING_KEY_STR("fastforward.mode", "hold") != "toggle")
+                            GameSignal::instance().requestFastForward(false);
+                    },
+                    TriggerType::RELEASE);
             }
         }
 
@@ -3636,8 +3642,8 @@ namespace beiklive
         // 持久化画面模式到数据库
         if (beiklive::GameDB && !m_gameEntry.path.empty()) {
             beiklive::GameDB->set(m_gameEntry.path, "displayMode",
-                nlohmann::json(m_gameEntry.displayMode));
-            beiklive::GameDB->flush();
+                nlohmann::json(m_gameEntry.displayMode), false);
+            _scheduleDisplaySettingsSave();
         }
     }
 
@@ -3647,8 +3653,8 @@ namespace beiklive
 
         if (beiklive::GameDB && !m_gameEntry.path.empty()) {
             beiklive::GameDB->set(m_gameEntry.path, "integerAspectRatio",
-                nlohmann::json(static_cast<float>(scale)));
-            beiklive::GameDB->flush();
+                nlohmann::json(static_cast<float>(scale)), false);
+            _scheduleDisplaySettingsSave();
         }
     }
 
@@ -3661,13 +3667,32 @@ namespace beiklive
         // 持久化自定义值到数据库
         if (beiklive::GameDB && !m_gameEntry.path.empty()) {
             beiklive::GameDB->set(m_gameEntry.path, "customOffsetX",
-                nlohmann::json(static_cast<double>(x)));
+                nlohmann::json(static_cast<double>(x)), false);
             beiklive::GameDB->set(m_gameEntry.path, "customOffsetY",
-                nlohmann::json(static_cast<double>(y)));
+                nlohmann::json(static_cast<double>(y)), false);
             beiklive::GameDB->set(m_gameEntry.path, "customScale",
-                nlohmann::json(static_cast<double>(scale)));
-            beiklive::GameDB->flush();
+                nlohmann::json(static_cast<double>(scale)), false);
+            _scheduleDisplaySettingsSave();
         }
+    }
+
+    void MgbaGameView::_scheduleDisplaySettingsSave()
+    {
+        m_displaySettingsSavePending = true;
+        if (m_displaySettingsSaveDelayId)
+            brls::cancelDelay(m_displaySettingsSaveDelayId);
+        m_displaySettingsSaveDelayId = brls::delay(180, [this]() {
+            m_displaySettingsSaveDelayId = 0;
+            _flushDisplaySettings();
+        });
+    }
+
+    void MgbaGameView::_flushDisplaySettings()
+    {
+        if (!m_displaySettingsSavePending || !beiklive::GameDB || m_gameEntry.path.empty())
+            return;
+        m_displaySettingsSavePending = false;
+        beiklive::GameDB->flush();
     }
 
     void MgbaGameView::_onOverlayToggle(bool enabled)

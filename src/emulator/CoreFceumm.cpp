@@ -148,12 +148,13 @@ bool CoreFceumm::SetupGame(beiklive::GameEntry GameEntry)
 {
     m_gameEntry = std::move(GameEntry);
     m_lastError.clear();
-    if (!_checkFdsBios(m_gameEntry.path))
+    const std::string& runtimePath = m_gameEntry.runtimePath.empty() ? m_gameEntry.path : m_gameEntry.runtimePath;
+    if (!_checkFdsBios(runtimePath))
         return false;
     _initConfig();
     if (_loadCore())
     {
-        if (_loadRom(m_gameEntry.path))
+        if (_loadRom(runtimePath))
         {
             m_core.reset();
             _loadSram();
@@ -346,13 +347,19 @@ bool CoreFceumm::_checkFdsBios(const std::string& romPath)
 
 bool CoreFceumm::_loadSram()
 {
-    return core_utils::loadSram(m_core, m_gameEntry.savePath,
+    const std::string savePath = m_gameEntry.savePath.empty()
+        ? beiklive::tools::defaultGameSavePath(m_gameEntry.platform, m_gameEntry.path)
+        : m_gameEntry.savePath;
+    return core_utils::loadSram(m_core, savePath,
         beiklive::tools::getFileNameWithoutExtension(m_gameEntry.path));
 }
 
 bool CoreFceumm::_saveSram()
 {
-    return core_utils::saveSram(m_core, m_gameEntry.savePath,
+    const std::string savePath = m_gameEntry.savePath.empty()
+        ? beiklive::tools::defaultGameSavePath(m_gameEntry.platform, m_gameEntry.path)
+        : m_gameEntry.savePath;
+    return core_utils::saveSram(m_core, savePath,
         beiklive::tools::getFileNameWithoutExtension(m_gameEntry.path));
 }
 

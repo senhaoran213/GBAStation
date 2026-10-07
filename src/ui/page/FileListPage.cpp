@@ -1,6 +1,7 @@
 #include "FileListPage.hpp"
 #include "core/Translation.hpp"
 #include "ui/utils/AnimationHelper.hpp"
+#include "ui/utils/MaterialIcons.hpp"
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -12,6 +13,37 @@ namespace beiklive
 
     namespace
     {
+        std::optional<beiklive::GameEntry> findGameDbEntryForFileBrowser(
+            const std::string& path)
+        {
+            if (!beiklive::GameDB)
+                return std::nullopt;
+
+            if (auto exact = beiklive::GameDB->findByPath(path))
+                return exact;
+
+            std::string stem = beiklive::tools::getFileNameWithoutExtension(
+                fs::path(path).filename().string());
+            std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (stem.empty())
+                return std::nullopt;
+
+            for (const auto& entry : beiklive::GameDB->getAll())
+            {
+                std::string entryStem = beiklive::tools::getFileNameWithoutExtension(
+                    fs::path(entry.path).filename().string());
+                std::transform(entryStem.begin(), entryStem.end(), entryStem.begin(),
+                               [](unsigned char c) {
+                                   return static_cast<char>(std::tolower(c));
+                               });
+                if (entryStem == stem)
+                    return entry;
+            }
+            return std::nullopt;
+        }
+
         class FilePanelSurface final : public brls::Box
         {
         public:
@@ -175,9 +207,9 @@ namespace beiklive
                         if (!text.empty()) {
                             beiklive::NameMappingManager->Set(filename, text, true);
                             beiklive::NameMappingManager->Save();
-                            auto entryOpt = beiklive::GameDB ? beiklive::GameDB->findByPath(fullPath) : std::nullopt;
+                            auto entryOpt = findGameDbEntryForFileBrowser(fullPath);
                             if (entryOpt) {
-                                beiklive::GameDB->set(fullPath, "title", nlohmann::json(text));
+                                beiklive::GameDB->set(entryOpt->path, "title", nlohmann::json(text));
                                 beiklive::GameDB->flush();
                             }
                         }
@@ -417,9 +449,10 @@ namespace beiklive
             ft == beiklive::enums::FileType::GENESIS_ROM ||
             ft == beiklive::enums::FileType::ARCADE_ROM ||
             ft == beiklive::enums::FileType::DREAMCAST_ROM ||
-            ft == beiklive::enums::FileType::PSP_ROM)
+            ft == beiklive::enums::FileType::PSP_ROM ||
+            ft == beiklive::enums::FileType::PS1_ROM)
         {
-            auto entryOpt = beiklive::GameDB ? beiklive::GameDB->findByPath(data.fullPath) : std::nullopt;
+            auto entryOpt = findGameDbEntryForFileBrowser(data.fullPath);
             if (entryOpt)
                 _showGameDBDetail(data, *entryOpt);
             else
@@ -704,14 +737,25 @@ namespace beiklive
                 }
 
                 for (const auto& raw : files) {
-                    // 不按游戏类型区分图标：文件一律默认文件图标；
-                    // NDS 这类可自动提取内置图标的 ROM 仍提取图标。
+                    // 压缩包和游戏文件使用 Material Icons，避免与普通文件混淆。
                     std::string ip = BK_RES(iconPrefix + "wenjian.png");
                     auto fileType = beiklive::tools::getFileType(raw.fullPath);
                     ip = resolveFileListIcon(fileType, raw.fullPath, ip);
                     std::string sizeStr = beiklive::tools::getFileSizeString(raw.fullPath);
                     dirData.push_back({raw.name, raw.fullPath, ip, fileType, sizeStr, 0});
-                    items.push_back({raw.name, sizeStr, ip, raw.fullPath});
+                    beiklive::ListItem listItem{raw.name, sizeStr, ip, raw.fullPath};
+                    if (fileType == beiklive::enums::FileType::ZIP_FILE) {
+                        listItem.materialIcon = beiklive::material::ARCHIVE;
+                        listItem.iconPath.clear();
+                    } else if (fileType != beiklive::enums::FileType::NORMAL_FILE &&
+                               fileType != beiklive::enums::FileType::IMAGE_FILE) {
+                        // NDS 有可用的内置封面时保留封面，否则使用统一游戏图标。
+                        if (fileType != beiklive::enums::FileType::NDS_ROM || ip == BK_RES(iconPrefix + "wenjian.png")) {
+                            listItem.materialIcon = beiklive::material::FILE_GAME;
+                            listItem.iconPath.clear();
+                        }
+                    }
+                    items.push_back(std::move(listItem));
                 }
             }
 

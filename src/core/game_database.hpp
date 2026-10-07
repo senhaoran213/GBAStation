@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 #include <mutex>
 
@@ -70,10 +71,12 @@ namespace beiklive
         // ── 通用字段访问接口（基于 JSON 中间层，方便新增字段无需修改调用代码）──
 
         /// 通过 crc32 设置游戏条目的某个字段（支持 GameEntry 中的所有 JSON 字段名）
-        bool set(int crc32, const std::string &key, const nlohmann::json &value);
+        bool set(int crc32, const std::string &key, const nlohmann::json &value,
+                 bool triggerAutoSave = true);
 
         /// 通过文件路径设置游戏条目的某个字段
-        bool set(const std::string &path, const std::string &key, const nlohmann::json &value);
+        bool set(const std::string &path, const std::string &key, const nlohmann::json &value,
+                 bool triggerAutoSave = true);
 
         /// 通过 crc32 获取游戏条目的某个字段，不存在则返回 defaultValue
         nlohmann::json get(int crc32, const std::string &key, const nlohmann::json &defaultValue = nullptr) const;
@@ -118,6 +121,14 @@ namespace beiklive
         std::vector<GameEntry> data_;
         std::unordered_map<int, size_t> crc32Index_;
         std::unordered_map<std::string, size_t> pathIndex_;
+
+        /// 平台文件在本进程启动时存在但无法安全读取（解析失败、不是数组，
+        /// 或主文件缺失但留有 .tmp/.bak 事务残留）的平台集合。
+        ///
+        /// 这些平台的内存视图是“空”的，但磁盘上的文件可能仍然是完好的。
+        /// saveToDir() 必须跳过它们：否则一次瞬时读取失败就会被写成空数组，
+        /// 造成不可逆的 GameData_<平台>.json 数据清空。
+        std::unordered_set<int> unreadablePlatforms_;
 
 
         // 自动保存相关

@@ -34,18 +34,18 @@ target_include_directories(giflib PUBLIC
 )
 
 # =========================================================
-# FFmpeg - background MP4 playback only
+# FFmpeg - background MP4 video/audio playback
 #
 # Do not use the system FFmpeg executable or shared libraries.  The custom
-# target configures an isolated, static build with just MOV/MP4 demuxing,
-# H.264 decoding, file input and RGBA scaling.  In particular it excludes
-# programs, audio, filters, devices, encoders, muxers and network support.
+# target configures an isolated, static build with MOV/MP4 demuxing, common
+# video/audio decoders, file input, RGBA scaling and PCM resampling. In particular it excludes
+# programs, filters, devices, encoders, muxers and network support.
 # =========================================================
 set(FFMPEG_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg)
 # FFmpeg's configure generates headers and objects in its source directory.
 # Keep a self-contained source copy under each CMake build directory so
 # Windows and Switch never share architecture-specific static archives.
-set(FFMPEG_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/ffmpeg-minimal)
+set(FFMPEG_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/ffmpeg-background-audio)
 set(FFMPEG_BUILD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/configure_ffmpeg_minimal.sh)
 # The configured copy is regenerated whenever the vendored source changes.
 # Without this dependency CMake can retain archives from a prior platform or
@@ -81,6 +81,7 @@ set(FFMPEG_STATIC_LIBRARIES
     ${FFMPEG_BUILD_DIR}/libavcodec/libavcodec.a
     ${FFMPEG_BUILD_DIR}/libavformat/libavformat.a
     ${FFMPEG_BUILD_DIR}/libswscale/libswscale.a
+    ${FFMPEG_BUILD_DIR}/libswresample/libswresample.a
 )
 
 add_custom_command(
@@ -93,15 +94,15 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(ffmpeg_minimal DEPENDS ${FFMPEG_STATIC_LIBRARIES})
-file(MAKE_DIRECTORY ${FFMPEG_BUILD_DIR})
 
 function(add_ffmpeg_static_library TARGET_NAME LIBRARY_PATH)
     add_library(${TARGET_NAME} STATIC IMPORTED GLOBAL)
     set_target_properties(${TARGET_NAME} PROPERTIES
         IMPORTED_LOCATION ${LIBRARY_PATH}
-        # Public headers include generated libavutil/avconfig.h. Prefer the
-        # isolated build copy so both headers and configuration match the libs.
-        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_BUILD_DIR};${FFMPEG_SOURCE_DIR}"
+        # Public FFmpeg headers are source files. Generated configuration
+        # headers (avconfig.h 等) live in the per-build configured copy
+        # (FFMPEG_BUILD_DIR), so include both for host code that uses FFmpeg.
+        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_SOURCE_DIR};${FFMPEG_BUILD_DIR}"
     )
     add_dependencies(${TARGET_NAME} ffmpeg_minimal)
 endfunction()
@@ -110,9 +111,11 @@ add_ffmpeg_static_library(ffmpeg_avutil ${FFMPEG_BUILD_DIR}/libavutil/libavutil.
 add_ffmpeg_static_library(ffmpeg_avcodec ${FFMPEG_BUILD_DIR}/libavcodec/libavcodec.a)
 add_ffmpeg_static_library(ffmpeg_avformat ${FFMPEG_BUILD_DIR}/libavformat/libavformat.a)
 add_ffmpeg_static_library(ffmpeg_swscale ${FFMPEG_BUILD_DIR}/libswscale/libswscale.a)
+add_ffmpeg_static_library(ffmpeg_swresample ${FFMPEG_BUILD_DIR}/libswresample/libswresample.a)
 target_link_libraries(ffmpeg_avcodec INTERFACE ffmpeg_avutil)
 target_link_libraries(ffmpeg_avformat INTERFACE ffmpeg_avcodec ffmpeg_avutil)
 target_link_libraries(ffmpeg_swscale INTERFACE ffmpeg_avutil)
+target_link_libraries(ffmpeg_swresample INTERFACE ffmpeg_avutil)
 
 # =========================================================
 # mGBA 模拟器  –  源码 native 静态库构建
@@ -132,6 +135,10 @@ if (PLATFORM_SWITCH)
     set(BUILD_GLES3     OFF CACHE BOOL "" FORCE)
     set(USE_SQLITE3     OFF CACHE BOOL "" FORCE)
 endif ()
+
+# The frontend archive adapter reuses mGBA's vendored 7-Zip LZMA SDK on every
+# target, including LIBMGBA_ONLY Switch builds.
+set(USE_LZMA ON CACHE BOOL "Enable mGBA 7-Zip support" FORCE)
 
 set(BUILD_PERF     OFF CACHE BOOL "" FORCE)
 set(BUILD_TEST     OFF CACHE BOOL "" FORCE)
@@ -234,34 +241,32 @@ function(add_isolated_libretro_core TARGET OBJECT_TARGET PREFIX)
     set(_raw_target "${TARGET}_raw")
     set(_tmp_obj "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_combined.tmp.o")
     set(_out_obj "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_combined.o")
-    set(_keep_args)
+    set(_keep)
     foreach(_sym IN LISTS LIBRETRO_API_SYMBOLS)
-        list(APPEND _keep_args "--keep-global-symbol=${PREFIX}_${_sym}")
+        list(APPEND _keep "${PREFIX}_${_sym}")
     endforeach()
     if (PREFIX STREQUAL "nestopia")
-        list(APPEND _keep_args
-            "--wildcard"
-            "--keep-global-symbol=_ZN3Nes*"
-            "--keep-global-symbol=_ZNK3Nes*"
-            "--keep-global-symbol=_ZTVN3Nes*"
-            "--keep-global-symbol=_ZTIN3Nes*"
-            "--keep-global-symbol=_ZTSN3Nes*"
-            "--keep-global-symbol=_ZNSt*"
-            "--keep-global-symbol=_ZNKSt*"
-            "--keep-global-symbol=_ZSt*"
+        list(APPEND _keep
+            "_ZN3Nes*"
+            "_ZNK3Nes*"
+            "_ZTVN3Nes*"
+            "_ZTIN3Nes*"
+            "_ZTSN3Nes*"
+            "_ZNSt*"
+            "_ZNKSt*"
+            "_ZSt*"
         )
     elseif(PREFIX STREQUAL "gambatte")
-        list(APPEND _keep_args
-            "--wildcard"
-            "--keep-global-symbol=_ZN8gambatte*"
-            "--keep-global-symbol=_ZNK8gambatte*"
-            "--keep-global-symbol=_ZTVN8gambatte*"
-            "--keep-global-symbol=_ZTIN8gambatte*"
-            "--keep-global-symbol=_ZTSN8gambatte*"
-            "--keep-global-symbol=_ZNSt*"
-            "--keep-global-symbol=_ZNKSt*"
-            "--keep-global-symbol=_ZSt*"
-            "--keep-global-symbol=blip*"
+        list(APPEND _keep
+            "_ZN8gambatte*"
+            "_ZNK8gambatte*"
+            "_ZTVN8gambatte*"
+            "_ZTIN8gambatte*"
+            "_ZTSN8gambatte*"
+            "_ZNSt*"
+            "_ZNKSt*"
+            "_ZSt*"
+            "blip*"
         )
     endif()
 
@@ -269,16 +274,71 @@ function(add_isolated_libretro_core TARGET OBJECT_TARGET PREFIX)
     add_dependencies(${_raw_target} ${OBJECT_TARGET})
     set_target_properties(${_raw_target} PROPERTIES LINKER_LANGUAGE C)
 
-    add_custom_command(
-        OUTPUT "${_out_obj}"
-        COMMAND ${CMAKE_COMMAND} -E rm -f "${_tmp_obj}" "${_out_obj}"
-        COMMAND ${CMAKE_CXX_COMPILER} -r -o "${_tmp_obj}"
-                -Wl,--whole-archive "$<TARGET_FILE:${_raw_target}>" -Wl,--no-whole-archive
-        COMMAND ${CMAKE_OBJCOPY} ${_keep_args} "${_tmp_obj}" "${_out_obj}"
-        DEPENDS ${_raw_target}
-        COMMAND_EXPAND_LISTS
-        VERBATIM
-    )
+    # 通配/精确 keep 模式写入临时文件，避免在自定义命令参数里传递带分号的列表。
+    set(_keep_file "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.keep_patterns.txt")
+    file(WRITE "${_keep_file}" "")
+    foreach(_pat IN LISTS _keep)
+        file(APPEND "${_keep_file}" "${_pat}\n")
+    endforeach()
+
+    if(APPLE)
+        # Apple 工具链没有 GNU ld/objcopy。合并用 ld64 的 -all_load，
+        # 符号隔离用 ld -r -exported_symbols_list（通配符由辅助脚本经 nm 展开）。
+        set(_mac_deploy "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+        if(NOT _mac_deploy)
+            set(_mac_deploy "10.15")
+        endif()
+        set(_mac_arch "${CMAKE_OSX_ARCHITECTURES}")
+        if(NOT _mac_arch)
+            execute_process(COMMAND uname -m OUTPUT_VARIABLE _mac_machine OUTPUT_STRIP_TRAILING_WHITESPACE)
+            if(_mac_machine STREQUAL "x86_64")
+                set(_mac_arch "x86_64")
+            else()
+                set(_mac_arch "arm64")
+            endif()
+        endif()
+        # Apple Silicon 的 arm64 目标最低只支持 11.0，clang 会自动抬高部署版本；
+        # ld -r 的 -platform_version 必须 >= 成员对象版本，否则不会产出合并对象。
+        if(_mac_arch STREQUAL "arm64")
+            set(_mac_minos "11.0")
+        else()
+            set(_mac_minos "${_mac_deploy}")
+        endif()
+        add_custom_command(
+            OUTPUT "${_out_obj}"
+            COMMAND ${CMAKE_COMMAND}
+                    -DRAWA="$<TARGET_FILE:${_raw_target}>"
+                    -DOUT="${_out_obj}"
+                    -DKEEPFILE="${_keep_file}"
+                    -DARCH="${_mac_arch}"
+                    -DMINOS="${_mac_minos}"
+                    -P "${CMAKE_SOURCE_DIR}/tools/macos_isolate_libretro.cmake"
+            DEPENDS ${_raw_target}
+            VERBATIM
+        )
+    else()
+        set(_keep_args)
+        set(_need_wildcard)
+        foreach(_pat IN LISTS _keep)
+            list(APPEND _keep_args "--keep-global-symbol=${_pat}")
+            if(_pat MATCHES "\\*")
+                set(_need_wildcard TRUE)
+            endif()
+        endforeach()
+        if(_need_wildcard)
+            list(INSERT _keep_args 0 "--wildcard")
+        endif()
+        add_custom_command(
+            OUTPUT "${_out_obj}"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${_tmp_obj}" "${_out_obj}"
+            COMMAND ${CMAKE_CXX_COMPILER} -r -o "${_tmp_obj}"
+                    -Wl,--whole-archive "$<TARGET_FILE:${_raw_target}>" -Wl,--no-whole-archive
+            COMMAND ${CMAKE_OBJCOPY} ${_keep_args} "${_tmp_obj}" "${_out_obj}"
+            DEPENDS ${_raw_target}
+            COMMAND_EXPAND_LISTS
+            VERBATIM
+        )
+    endif()
     set_source_files_properties("${_out_obj}" PROPERTIES
         GENERATED TRUE
         EXTERNAL_OBJECT TRUE
@@ -368,9 +428,27 @@ target_compile_definitions(fceumm_core_obj PRIVATE
     __LIBRETRO__
     PATH_MAX=1024
     FCEU_VERSION_NUMERIC=9900
+    # Match upstream Makefile.libretro's libnx target (WANT_32BPP=1).
+    # The frontend converts XRGB8888 to its internal RGBA snapshot format.
     FRONTEND_SUPPORTS_RGB888
     HAVE_NTSC_FILTER
 )
+if (PLATFORM_SWITCH)
+    # Match FCEUmm's upstream `platform=libnx` build. These flags select
+    # Switch-safe VFS and static-linking paths used before the first emulated
+    # frame, rather than the desktop fallback selected by a generic CMake build.
+    target_compile_definitions(fceumm_core_obj PRIVATE
+        SWITCH=1
+        __SWITCH__
+        HAVE_LIBNX
+        RARCH_INTERNAL
+        STATIC_LINKING
+        ARM
+    )
+    # libnx builds explicitly remove host Linux defines before selecting
+    # Switch-specific VFS and platform code.
+    target_compile_options(fceumm_core_obj PRIVATE -U__linux__ -U__linux -mtp=soft)
+endif()
 
 apply_retro_symbol_rename(fceumm_core_obj fceumm)
 apply_data_symbol_rename(fceumm_core_obj fceumm)
@@ -548,6 +626,10 @@ target_compile_definitions(nestopia_core_obj PRIVATE __LIBRETRO__)
 apply_retro_symbol_rename(nestopia_core_obj nestopia)
 apply_data_symbol_rename(nestopia_core_obj nestopia)
 set_target_properties(nestopia_core_obj PROPERTIES CXX_STANDARD 11 C_STANDARD 11)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # libretro 老代码在 C++11 下 list-init 窄化是硬错误，降级为警告即可通过编译
+    target_compile_options(nestopia_core_obj PRIVATE -Wno-c++11-narrowing)
+endif()
 add_isolated_libretro_core(nestopia_core nestopia_core_obj nestopia)
 
 # =========================================================
@@ -613,7 +695,9 @@ target_include_directories(gambatte_core_obj PRIVATE
     ${GAMBATTE_LR_DIR}
     ${GAMBATTE_LRC_DIR}/include
 )
-target_compile_definitions(gambatte_core_obj PRIVATE __LIBRETRO__)
+# Use Gambatte's native RGB565 output. It retains the core's 256-pixel row
+# stride while avoiding the XRGB8888 path shared with FCEUmm.
+target_compile_definitions(gambatte_core_obj PRIVATE __LIBRETRO__ VIDEO_RGB565)
 target_compile_options(gambatte_core_obj PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdint>")
 if (PLATFORM_SWITCH)
     target_compile_definitions(gambatte_core_obj PRIVATE __SWITCH__ SWITCH HAVE_LIBNX)
@@ -824,108 +908,4 @@ endif()
 
 target_link_libraries(melonds_core PRIVATE teakra)
 
-if (PLATFORM_SWITCH)
-set(ARCDELTA_MELONDS_PATH ${CMAKE_CURRENT_SOURCE_DIR}/ArcDelta_melonDS)
-set(ARCDELTA_MELONDS_SRC_DIR ${ARCDELTA_MELONDS_PATH}/src)
-set(ARCDELTA_MELONDS_CORE_SRC
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARCodeFile.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/AREngine.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARM.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMInterpreter.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMInterpreter_ALU.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMInterpreter_Branch.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMInterpreter_LoadStore.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/Config.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/CP15.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/CRC32.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DMA.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi_AES.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi_Camera.cpp
-    ${CMAKE_SOURCE_DIR}/nds_stub/src/NdsArcDeltaDsiDspStub.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi_I2C.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi_NDMA.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi_NWifi.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi_SD.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/DSi_SPI_TSC.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GBACart.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU2D.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU2D_Soft.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU2D_Deko.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU3D.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU3D_Transform.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU3D_Soft.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/GPU3D_Deko.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/NDS.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/NDSCart.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/NDSCart_SRAMManager.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/RTC.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/Savestate.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/SPI.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/SPU.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/Wifi.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/WifiAP.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARM_InstrInfo.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMJIT.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMJIT_Memory.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/dolphin/CommonFuncs.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/dolphin/Arm64Emitter.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/dolphin/MathUtil.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMJIT_A64/ARMJIT_Compiler.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMJIT_A64/ARMJIT_ALU.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMJIT_A64/ARMJIT_LoadStore.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMJIT_A64/ARMJIT_Branch.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/ARMJIT_A64/ARMJIT_Linkage.S
-    ${ARCDELTA_MELONDS_SRC_DIR}/frontend/switch/PlatformConfig.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/frontend/switch/FaultHandler.cpp
-    ${ARCDELTA_MELONDS_SRC_DIR}/tiny-AES-c/aes.c
-    ${ARCDELTA_MELONDS_SRC_DIR}/xxhash/xxhash.c
-)
-
-add_library(arcdelta_melonds_core STATIC ${ARCDELTA_MELONDS_CORE_SRC})
-target_include_directories(arcdelta_melonds_core PUBLIC
-    ${ARCDELTA_MELONDS_SRC_DIR}
-)
-target_compile_definitions(arcdelta_melonds_core PUBLIC
-    DEKOGPU_ENABLED
-    JIT_ENABLED
-    MELONDS_VERSION="AD"
-    __SWITCH__
-    SWITCH
-    HAVE_LIBNX
-    ARCHITECTURE_ARM64=1
-)
-target_compile_options(arcdelta_melonds_core PRIVATE
-    -O3
-    -flto
-    -fPIC
-    "$<$<COMPILE_LANGUAGE:CXX>:-Wno-invalid-offsetof>"
-)
-target_link_libraries(arcdelta_melonds_core PRIVATE teakra nx deko3d)
-
-set(ARCDELTA_SWITCH_FRONTEND_DIR ${ARCDELTA_MELONDS_SRC_DIR}/frontend/switch)
-add_library(arcdelta_switch_gfx STATIC
-    ${ARCDELTA_SWITCH_FRONTEND_DIR}/Gfx.cpp
-    ${ARCDELTA_SWITCH_FRONTEND_DIR}/GpuMemHeap.cpp
-    ${ARCDELTA_SWITCH_FRONTEND_DIR}/UploadBuffer.cpp
-    ${ARCDELTA_SWITCH_FRONTEND_DIR}/mm_vec/mm_vec.c
-    ${ARCDELTA_SWITCH_FRONTEND_DIR}/stb_truetype/stb_truetype.c
-)
-target_include_directories(arcdelta_switch_gfx PUBLIC
-    ${ARCDELTA_SWITCH_FRONTEND_DIR}
-    ${ARCDELTA_MELONDS_SRC_DIR}
-)
-target_compile_definitions(arcdelta_switch_gfx PUBLIC
-    __SWITCH__
-    SWITCH
-    HAVE_LIBNX
-)
-target_compile_options(arcdelta_switch_gfx PRIVATE
-    -O3
-    -flto
-    -fPIC
-)
-target_link_libraries(arcdelta_switch_gfx PRIVATE nx deko3d)
-endif()
 endif()

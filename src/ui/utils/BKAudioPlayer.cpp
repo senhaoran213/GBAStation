@@ -2,6 +2,7 @@
 
 #include "core/common.h"
 #include "game/audio/AudioManager.hpp"
+#include "ui/utils/BackgroundAudioPlayer.hpp"
 #include <borealis/core/logger.hpp>
 
 #include <algorithm>
@@ -33,6 +34,7 @@
 namespace beiklive {
 
 std::atomic<bool> BKAudioPlayer::s_gameAudioActive{false};
+std::atomic<bool> BKAudioPlayer::s_playing{false};
 
 void BKAudioPlayer::setGameAudioActive(bool active)
 {
@@ -42,6 +44,11 @@ void BKAudioPlayer::setGameAudioActive(bool active)
 bool BKAudioPlayer::isGameAudioActive()
 {
     return s_gameAudioActive.load(std::memory_order_acquire);
+}
+
+bool BKAudioPlayer::isAnyPlaying()
+{
+    return s_playing.load(std::memory_order_acquire);
 }
 
 // ============================================================
@@ -196,6 +203,22 @@ static bool isButtonSfxEnabled()
     return true;
 }
 
+static float buttonSfxVolume()
+{
+    return std::clamp(
+        static_cast<float>(GET_SETTING_KEY_INT(
+            beiklive::SettingKey::KEY_AUDIO_BUTTON_SFX_VOLUME, 100)) / 100.0f,
+        0.0f, 1.0f);
+}
+
+static float masterVolume()
+{
+    return std::clamp(
+        static_cast<float>(GET_SETTING_KEY_INT(
+            beiklive::SettingKey::KEY_AUDIO_MASTER_VOLUME, 100)) / 100.0f,
+        0.0f, 1.0f);
+}
+
 std::string BKAudioPlayer::soundsDir()
 {
     return beiklive::res_path("sounds/switch/");
@@ -219,7 +242,8 @@ std::string BKAudioPlayer::soundFileName(brls::Sound sound)
 #ifdef __SWITCH__
 void BKAudioPlayer::_initSwitch()
 {
-    // 初始化 audout 服务（引用计数，允许多次调用）
+    std::lock_guard<std::mutex> outputLock(BackgroundAudioPlayer::switchOutputMutex());
+    // 初始化进程级 audout 服务；其生命周期由 BKAudioPlayer 独占管理。
     Result rc = audoutInitialize();
     if (R_FAILED(rc))
     {
@@ -263,8 +287,12 @@ BKAudioPlayer::~BKAudioPlayer()
 #ifdef __SWITCH__
     if (m_switchInit)
     {
-        audoutStopAudioOut();
-        audoutExit();
+        // Borealis destroys its platform during Application::exit(), before
+        // main() gets back to this custom player's destructor. Closing the
+        // process-wide audout service here can therefore race with the
+        // platform teardown (and may be a second stop/exit). All producers
+        // have already stopped and the OS will reclaim audout with the
+        // process, so leave the service alive until process termination.
         m_switchInit = false;
     }
 #endif // __SWITCH__
@@ -416,8 +444,22 @@ void BKAudioPlayer::playbackThread()
             load(sound);
         }
 
-        if (m_sounds[idx].loaded)
-            playSoundDirect(idx, m_sounds[idx], pitch);
+        if (m_sounds[idx].loaded) {
+            // The stored WAV remains immutable so changing the selector takes
+            // effect on the very next UI sound without cumulative scaling.
+            WavData playback = m_sounds[idx];
+            const float volume = buttonSfxVolume() * masterVolume();
+            if (volume < 0.999f) {
+                for (auto& sample : playback.samples) {
+                    const int scaled = static_cast<int>(std::lround(
+                        static_cast<float>(sample) * volume));
+                    sample = static_cast<int16_t>(std::clamp(scaled, -32768, 32767));
+                }
+            }
+            s_playing.store(true, std::memory_order_release);
+            playSoundDirect(idx, playback, pitch);
+            s_playing.store(false, std::memory_order_release);
+        }
         // 若文件缺失则静默跳过
     }
 }
@@ -434,10 +476,8 @@ void BKAudioPlayer::playSoundDirect(int /*soundIdx*/, const WavData& wav, float 
     if (!m_switchInit || wav.samples.empty())
         return;
 
-    // 游戏音频系统运行时跳过UI音效播放：
-    // AudioManager 与 BKAudioPlayer 共用同一 audout 设备，若同时向硬件队列提交缓冲区，
-    // AudioManager 的线程可能"偷走" BKAudioPlayer 的完成通知，导致 BKAudioPlayer 在
-    // 音频缓冲区仍被硬件 DMA 读取时提前 free()，产生 use-after-free，引发撕裂音或音调异常。
+    // 游戏音频系统运行时仍跳过 UI 音效；前端背景音频则在下方混入同一
+    // 独立播放器的 overlay 队列，避免多个 audout 完成通知消费者互相干扰。
     if (AudioManager::instance().isRunning() || BKAudioPlayer::isGameAudioActive())
         return;
 
@@ -479,26 +519,61 @@ void BKAudioPlayer::playSoundDirect(int /*soundIdx*/, const WavData& wav, float 
         dst[i * 2 + 1] = R;
     }
 
-    // 提交缓冲区到 audout 队列播放
-    AudioOutBuffer buf = {};
-    buf.next        = nullptr;
-    buf.buffer      = rawBuf;
-    buf.buffer_size = alignedBytes;
-    buf.data_size   = dataBytes;
-    buf.data_offset = 0;
+    // The frontend background player owns the Switch output queue while the
+    // home screen is visible. Mix short UI sounds into its overlay queue so
+    // they are heard immediately without a second audout completion waiter.
+    if (BackgroundAudioPlayer::isAnyActive()) {
+        if (BackgroundAudioPlayer::mixActiveSamples(dst, outFrames)) {
+            free(rawBuf);
+            return;
+        }
+    }
 
-    if (R_SUCCEEDED(audoutAppendAudioOutBuffer(&buf)))
+    // 提交缓冲区到 audout 队列播放
+    // Keep the descriptor alive until audout confirms completion. A stack
+    // descriptor becomes invalid if another producer consumes the global
+    // completion notification before this sound's waiter sees it.
+    auto* buf = new AudioOutBuffer{};
+    buf->next        = nullptr;
+    buf->buffer      = rawBuf;
+    buf->buffer_size = alignedBytes;
+    buf->data_size   = dataBytes;
+    buf->data_offset = 0;
+
+    std::lock_guard<std::mutex> outputLock(BackgroundAudioPlayer::switchOutputMutex());
+    if (R_SUCCEEDED(audoutAppendAudioOutBuffer(buf)))
     {
         // 标记正在播放：外部系统（如 AudioManager::init）可通过 isPlaying() 等待本缓冲区完成
         m_isPlaying.store(true, std::memory_order_release);
         // 等待音频播放完成，超时为音频时长的2倍 + 200ms
-        u64 waitNs = static_cast<u64>(inFrames) * 2000000000ULL / wav.sampleRate + 200000000ULL;
-        AudioOutBuffer* released = nullptr;
-        u32 relCount = 0;
-        audoutWaitPlayFinish(&released, &relCount, waitNs);
+        const u64 waitNs = static_cast<u64>(inFrames) * 2000000000ULL / wav.sampleRate + 200000000ULL;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(waitNs);
+        bool safeToFree = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            AudioOutBuffer* released = nullptr;
+            u32 relCount = 0;
+            const auto remainingNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remainingNs <= 0)
+                break;
+            const u64 remaining = static_cast<u64>(remainingNs);
+            audoutWaitPlayFinish(&released, &relCount, remaining);
+            bool contains = true;
+            if (R_SUCCEEDED(audoutContainsAudioOutBuffer(buf, &contains))) {
+                if (!contains) {
+                    safeToFree = true;
+                    break;
+                }
+            }
+        }
         m_isPlaying.store(false, std::memory_order_release);
+        if (!safeToFree) {
+            brls::Logger::error("BKAudioPlayer: timed out waiting for Switch UI sound buffer; retaining it to avoid DMA use-after-free");
+            return;
+        }
     }
 
+    delete buf;
     free(rawBuf);
 }
 

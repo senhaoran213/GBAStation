@@ -11,7 +11,6 @@
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
 #include "core/rom/PspMeta.hpp"
-#include "core/ExternalCoreSession.hpp"
 #include "ui/utils/BKAudioPlayer.hpp"
 #include "ui/page/StartPage.hpp"
 #include "ui/widget/VideoBackgroundView.hpp"
@@ -68,6 +67,14 @@ bool isLibraryRomType(beiklive::enums::FileType type)
 		   type == beiklive::enums::FileType::DOLPHIN_ROM;
 }
 
+bool isEmbeddedArchivePlatform(int platform)
+{
+    using E = beiklive::enums::EmuPlatform;
+    return platform == static_cast<int>(E::EmuGBA) || platform == static_cast<int>(E::EmuGBC) ||
+           platform == static_cast<int>(E::EmuGB) || platform == static_cast<int>(E::EmuNES) ||
+           platform == static_cast<int>(E::EmuSNES) || platform == static_cast<int>(E::EmuGenesis);
+}
+
 std::optional<std::string> parseDirectLaunchRom(int argc, char* argv[])
 {
 	for (int i = 1; i < argc; ++i)
@@ -84,6 +91,8 @@ std::optional<std::string> parseDirectLaunchRom(int argc, char* argv[])
 				++i;
 			continue;
 		}
+		// 前端已不再发送会话 token；此分支保留是为了兼容旧外置核心回传的
+		// argv，避免其 token 值被当成 ROM 路径误判。
 		if (arg == "--external-return")
 		{
 			if (i + 1 < argc)
@@ -204,10 +213,29 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 bool launchDirectGameActivity(const std::string& romPath)
 {
 	const auto fileType = beiklive::tools::getFileType(romPath);
-	if (!isLibraryRomType(fileType))
+	const bool isArchive = fileType == beiklive::enums::FileType::ZIP_FILE;
+	if (!isLibraryRomType(fileType) && !isArchive)
 	{
 		brls::Logger::error("Direct launch path is not a supported ROM: {}", romPath);
 		return false;
+	}
+
+	if (isArchive)
+	{
+		// A forwarder contains only the ROM path. Its database entry retains the
+		// platform selected at installation time, so GamePage can handle the archive.
+		auto entry = beiklive::GameDB ? beiklive::GameDB->findByPath(romPath) : std::nullopt;
+		if (!entry || !isEmbeddedArchivePlatform(entry->platform))
+		{
+			brls::Logger::error("Direct archive launch has no supported embedded platform: {}", romPath);
+			return false;
+		}
+		auto* gamePage = new beiklive::GamePage(*entry, true);
+		auto* frame = new brls::AppletFrame(gamePage);
+		HIDE_BRLS_BAR(frame);
+		brls::Application::pushActivity(new brls::Activity(frame), brls::TransitionAnimation::NONE);
+		gamePage->startGame();
+		return true;
 	}
 
 	ensureDirectGameDbEntry(romPath, fileType);
@@ -230,13 +258,10 @@ bool launchDirectGameActivity(const std::string& romPath)
 
 		const std::string nroPath = GET_SETTING_KEY_STR(pathKey, defaultPath);
 		const std::string returnPath = GET_SETTING_KEY_STR(returnKey, "sdmc:/switch/GBAStation.nro");
-		const std::string sessionToken = beiklive::makeExternalCoreSessionToken(romPath);
-
 		beiklive::switch_platform::NroLaunchRequest request;
 		request.nroPath = nroPath;
 		request.romPath = romPath;
 		request.returnNroPath = returnPath;
-		request.extraArgs = {"--gbastation-session", sessionToken};
 		auto result = beiklive::switch_platform::launchNroOnExit(request);
 		if (!result.success)
 		{
@@ -245,10 +270,8 @@ bool launchDirectGameActivity(const std::string& romPath)
 			return false;
 		}
 
-		if (!beiklive::beginExternalCoreSession(romPath, platform, sessionToken))
-			brls::Logger::error("Direct {} external session tracking could not start for {}", label, romPath);
-
 		brls::Logger::info("Direct {} NRO launch configured: {}", label, result.message);
+		beiklive::VideoBackgroundView::setSharedAudioSuspended(true);
 		brls::Application::quit();
 		return true;
 	};
@@ -268,6 +291,7 @@ bool launchDirectGameActivity(const std::string& romPath)
 			return false;
 		}
 		brls::Logger::info("Direct 3DS NRO launch configured: {}", result.message);
+		beiklive::VideoBackgroundView::setSharedAudioSuspended(true);
 		brls::Application::quit();
 		return true;
 	}
@@ -296,8 +320,8 @@ bool launchDirectGameActivity(const std::string& romPath)
 	{
 		return launchExternalCore("PS1",
 			static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
-			"ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
-			"ps1.externalNro.returnPath");
+			"core.ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
+			"core.ps1.externalNro.returnPath");
 	}
 	if (fileType == beiklive::enums::FileType::SATURN_ROM)
 	{
@@ -352,19 +376,15 @@ bool launchDirectGameActivity(const std::string& romPath)
 
 int main(int argc, char* argv[]) {
 #ifdef __SWITCH__
+	// First statement in the process: prove the launcher itself started.
+	// If a core chainloads back and this line is missing, the handoff died
+	// before reaching us; if it is present, the crash is inside the launcher.
+	beiklive::switch_platform::logLauncherEntry(argc, argv);
     appletInitializeGamePlayRecording();
 #endif
 
 
 	beiklive::ConfigureInit();
-
-	const std::string externalReturnToken = beiklive::externalCoreReturnToken(argc, argv);
-	if (!externalReturnToken.empty())
-	{
-		const bool updated = beiklive::finishExternalCoreSession(externalReturnToken);
-		brls::Logger::info("External core session stats {} for token {}",
-			updated ? "updated" : "not updated", externalReturnToken);
-	}
 
 	// ── 从配置文件读取调试设置 ──────────────────────────────────
 	{
@@ -494,6 +514,12 @@ int main(int argc, char* argv[]) {
 	while (brls::Application::mainLoop())
 		beiklive::network::WebService::Update();
 
+	// The exit event normally performs this while the NanoVG context is still
+	// alive. Keep an idempotent fallback here for shutdown paths that leave the
+	// main loop without firing the event, and ensure the decoder/audio workers
+	// are stopped before the custom AudioPlayer is destroyed below.
+	beiklive::VideoBackgroundView::shutdownSharedVideo();
+
 	// 通知线程退出并等待其完成
 	gExitFlag.store(true, std::memory_order_release);
 	if (updateThread.joinable())
@@ -507,6 +533,10 @@ int main(int argc, char* argv[]) {
 	audioPlayer = nullptr;
 
 #ifdef __SWITCH__
+	// 本次运行期间写入的文件（更新/下载的 NRO、Web 上传的 ROM、config.cfg 等）
+	// 即将交给 loader 与外置核心这些别的进程读取，退出前统一提交 FAT 写缓存。
+	beiklive::tools::commitSdCard();
+
 	auto launchResult = beiklive::switch_platform::commitPendingNroLaunch();
 	if (!launchResult.success)
 		brls::Logger::error("Pending NRO launch commit failed: {}", launchResult.message);

@@ -29,18 +29,15 @@ include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 project(GBAStation)
 set(VERSION_MAJOR "0")
 set(VERSION_MINOR "3")
-set(VERSION_ALTER "11")
+set(VERSION_ALTER "15")
 set(VERSION_BUILD "0")
 set(PACKAGE_NAME "com.beiklive.GBAStation")
 set(PROJECT_AUTHOR "beiklive")
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/resources/icon/default.png)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/resources)
 
-if (PLATFORM_SWITCH)
-    set(BUILD_MELONDS_CORE ON CACHE BOOL "Build melonDS only for the external NDS Stub NRO" FORCE)
-else()
-    set(BUILD_MELONDS_CORE OFF CACHE BOOL "Build the embedded melonDS native core" FORCE)
-endif()
+# NDS is built and released by the standalone GBAStation_melonds project.
+set(BUILD_MELONDS_CORE OFF CACHE BOOL "Build the embedded melonDS native core" FORCE)
 
 if (USE_LIBROMFS)
     add_libromfs(${PROJECT_NAME} ${PROJECT_RESOURCES})
@@ -210,7 +207,8 @@ include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/src)
 include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniz)
 include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mongoose)
 file(GLOB_RECURSE MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
-list(FILTER MAIN_SRC EXCLUDE REGEX ".*/src/platform/switch/nds_stub/.*")
+list(APPEND MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/core/Archive.cpp)
+list(REMOVE_DUPLICATES MAIN_SRC)
 list(FILTER MAIN_SRC EXCLUDE REGEX ".*/src/emulator/melonds/.*")
 list(FILTER MAIN_SRC EXCLUDE REGEX ".*/src/emulator/genesis/.*")
 list(FILTER MAIN_SRC EXCLUDE REGEX ".*/src/game/mgba/.*")
@@ -255,9 +253,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE genesis_core)
 if (PLATFORM_SWITCH)
     add_subdirectory(src/core/forwarder/hbl forwarder_hbl)
     add_dependencies(${PROJECT_NAME} gbastation_forwarder_hbl_exefs)
+    # ForwarderCore.cpp pulls the HBL stub in with #embed, which the compiler
+    # resolves at compile time.  Without an explicit dependency the object file is
+    # NOT rebuilt when the stub changes, and the launcher silently keeps shipping
+    # (and installing) an old stub -- exactly what happened when the stub gained
+    # its forwarder.log instrumentation.
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/forwarder/ForwarderCore.cpp
-        PROPERTIES COMPILE_OPTIONS "-std=gnu++2c;--embed-dir=${GBASTATION_FORWARDER_EMBED_DIR}"
+        PROPERTIES
+        COMPILE_OPTIONS "-std=gnu++2c;--embed-dir=${GBASTATION_FORWARDER_EMBED_DIR}"
+        OBJECT_DEPENDS "${GBASTATION_FORWARDER_EMBED_DIR}/exefs/main;${GBASTATION_FORWARDER_EMBED_DIR}/exefs/main.npdm"
     )
     target_compile_definitions(${PROJECT_NAME} PRIVATE MG_ARCH=MG_ARCH_UNIX)
 endif()
@@ -298,14 +303,11 @@ elseif (PLATFORM_SWITCH)
     add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
         COMMAND ${NX_NACPTOOL_EXE} --create "${PROJECT_NAME}" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp --titleid=${PROJECT_TITLEID}
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
-        COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_BINARY_DIR}/resources/core/GBAStationNDSStub.nro
         COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_BINARY_DIR}/resources/core/GBAStationFlycastStub.nro
         COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_BINARY_DIR}/resources/core/GBAStationFBNeoStub.nro
         COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/resources/font
         COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
     )
-
-    add_subdirectory(nds_stub)
 
 endif ()
 
@@ -315,7 +317,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${APP_PLATFORM_INCLUDE})
 target_compile_options(${PROJECT_NAME} PRIVATE -ffunction-sections -fdata-sections ${APP_PLATFORM_OPTION})
 target_link_libraries(${PROJECT_NAME} PRIVATE borealis ${APP_PLATFORM_LIB})
 target_link_libraries(${PROJECT_NAME} PRIVATE giflib)
-target_link_libraries(${PROJECT_NAME} PRIVATE ffmpeg_avformat ffmpeg_avcodec ffmpeg_swscale ffmpeg_avutil)
+target_link_libraries(${PROJECT_NAME} PRIVATE ffmpeg_avformat ffmpeg_avcodec ffmpeg_swscale ffmpeg_swresample ffmpeg_avutil)
 add_dependencies(${PROJECT_NAME} ffmpeg_minimal)
 if (WIN32)
     # Required by FFmpeg's minimal MinGW configuration (random seed and the
@@ -339,7 +341,7 @@ endif()
 # Nestopia      – NES / Famicom       (libretro, nestopia_retro_*)
 # Gambatte      – GB / GBC            (libretro source, gambatte_retro_*)
 # Snes9x 2005   – SNES / SFC          (libretro, snes9x2005_retro_*)
-# NDS runs in GBAStationNDSStub.nro, launched as a separate Switch NRO.
+# NDS runs in the separately built GBAStation_melonds NRO.
 #
 # mGBA 不再构建/加载 mgba_libretro，也不复制 mgba 动态库。
 # ============================================================
@@ -365,6 +367,7 @@ if (TARGET snes9x2005_core)
 endif()
 if (TARGET mgba)
     target_link_libraries(${PROJECT_NAME} PRIVATE mgba)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LZMA)
     target_include_directories(${PROJECT_NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mgba/include
         ${CMAKE_BINARY_DIR}/third_party/mgba/include

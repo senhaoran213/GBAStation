@@ -390,6 +390,15 @@ bool LibretroLoader::load(CoreType coreType)
     unload();
 
     m_coreType = coreType;
+    // Gambatte is built as RGB565. Keep this as its fallback in case a core
+    // reload reaches video output before pixel negotiation.
+    m_pixelFormat = coreType == CoreType::Gambatte
+        ? RETRO_PIXEL_FORMAT_RGB565
+        : RETRO_PIXEL_FORMAT_0RGB1555;
+    m_lastVideoLogWidth = 0;
+    m_lastVideoLogHeight = 0;
+    m_lastVideoLogPitch = 0;
+    m_lastVideoLogFormat = RETRO_PIXEL_FORMAT_0RGB1555;
     brls::Logger::debug("[LibretroLoader] load(CoreType={})", static_cast<int>(coreType));
 
     // 根据核心类型选择对应的符号集
@@ -611,14 +620,13 @@ void LibretroLoader::unload()
         fn_unload_game();
         m_gameLoaded = false;
     }
+    // Each loader owns its core session. Do not leave a statically linked core
+    // initialized after its callbacks and function bindings have been removed.
+    deinitCore();
     m_diskControl = {};
     m_diskControlExt = {};
     m_hasDiskControl = false;
     m_hasDiskControlExt = false;
-    // retro_deinit() intentionally not called here:
-    // many cores (especially PicoDrive) don't handle repeated init/deinit cycles.
-    // deinitCore() can be called explicitly when program exits.
-
     m_handle = nullptr;
     if (s_current == this) {
         s_current = nullptr;
@@ -657,13 +665,20 @@ void LibretroLoader::unload()
 // 核心生命周期
 // ============================================================
 
-// 跟踪哪些核心类型已经调用了 retro_init()，防止重复初始化
-static bool s_coreInitialized[5] = {false, false, false, false, false};
+// 跟踪哪些核心类型已经调用了 retro_init()，防止重复初始化。
+// CoreType 是连续枚举，数量必须覆盖最后一个枚举值（Gambatte=6）。
+constexpr size_t kCoreTypeCount = static_cast<size_t>(CoreType::Gambatte) + 1;
+static std::array<bool, kCoreTypeCount> s_coreInitialized{};
 
 bool LibretroLoader::initCore()
 {
     if (!m_handle) { brls::Logger::debug("[LibretroLoader] initCore: no handle"); return false; }
-    int idx = static_cast<int>(m_coreType);
+    const size_t idx = static_cast<size_t>(m_coreType);
+    if (idx >= s_coreInitialized.size()) {
+        brls::Logger::error("[LibretroLoader] initCore: invalid core type {}",
+                            static_cast<int>(m_coreType));
+        return false;
+    }
     if (s_coreInitialized[idx]) {
         brls::Logger::debug("[LibretroLoader] initCore: already initialized (idx={})", idx);
         m_coreReady = true;
@@ -680,9 +695,19 @@ bool LibretroLoader::initCore()
 void LibretroLoader::deinitCore()
 {
     if (!m_coreReady) return;
-    brls::Logger::debug("[LibretroLoader] deinitCore: calling retro_deinit()");
-    fn_deinit();
-    int idx = static_cast<int>(m_coreType);
+    const size_t idx = static_cast<size_t>(m_coreType);
+    if (idx >= s_coreInitialized.size()) {
+        brls::Logger::error("[LibretroLoader] deinitCore: invalid core type {}",
+                            static_cast<int>(m_coreType));
+        m_coreReady = false;
+        return;
+    }
+    if (fn_deinit) {
+        brls::Logger::debug("[LibretroLoader] deinitCore: calling retro_deinit()");
+        fn_deinit();
+    } else {
+        brls::Logger::warning("[LibretroLoader] deinitCore: missing retro_deinit callback");
+    }
     s_coreInitialized[idx] = false;
     m_coreReady = false;
 }
@@ -765,11 +790,20 @@ void LibretroLoader::unloadGame()
     m_diskControlExt = {};
     m_hasDiskControl = false;
     m_hasDiskControlExt = false;
+    m_loggedFirstRun = false;
 }
 
 void LibretroLoader::run()
 {
-    if (m_gameLoaded) fn_run();
+    if (!m_gameLoaded) return;
+    const bool trace = m_coreType == CoreType::Fceumm && !m_loggedFirstRun;
+    if (trace) {
+        m_loggedFirstRun = true;
+        brls::Logger::debug("[LibretroLoader] FCEUmm retro_run enter");
+    }
+    fn_run();
+    if (trace)
+        brls::Logger::debug("[LibretroLoader] FCEUmm retro_run return");
 }
 
 void LibretroLoader::reset()
@@ -1000,9 +1034,13 @@ bool LibretroLoader::s_environmentCallback(unsigned cmd, void* data)
         }
         case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: {
             const retro_pixel_format* fmt = static_cast<const retro_pixel_format*>(data);
+            if (!fmt) return false;
             if (*fmt == RETRO_PIXEL_FORMAT_XRGB8888 ||
                 *fmt == RETRO_PIXEL_FORMAT_RGB565) {
                 s_current->m_pixelFormat = *fmt;
+                brls::Logger::debug("[LibretroLoader] pixel format core={} format={}",
+                                    static_cast<int>(s_current->m_coreType),
+                                    static_cast<int>(*fmt));
                 return true;
             }
             return false;
@@ -1195,9 +1233,9 @@ bool LibretroLoader::s_environmentCallback(unsigned cmd, void* data)
             return true;
         }
         case RETRO_ENVIRONMENT_GET_VFS_INTERFACE: {
-            // VFS 不可用，返回 true 但 iface 保持 NULL
-            // 核心会回退到 stdio 文件操作
-            return true;
+            // Do not advertise an interface until all of its callbacks are implemented.
+            // Cores that receive true may dereference iface without checking it.
+            return false;
         }
         case RETRO_ENVIRONMENT_GET_LED_INTERFACE:
             // LED 接口不可用，核心不检查返回值
@@ -1235,7 +1273,9 @@ void LibretroLoader::s_videoRefreshCallback(const void* data,
     // 防御性检查：合理范围
     if (width < 16 || width > 720 || height < 16 || height > 576)
         return;
-    if (pitch < width * 2)
+    const size_t bytesPerPixel = s_current->m_pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888
+        ? 4u : 2u;
+    if (pitch < static_cast<size_t>(width) * bytesPerPixel)
         return;
 
     std::lock_guard<std::mutex> lk(s_current->m_videoMutex);
@@ -1298,6 +1338,27 @@ void LibretroLoader::s_videoRefreshCallback(const void* data,
             }
         }
     }
+
+    if (s_current->m_lastVideoLogWidth != width ||
+        s_current->m_lastVideoLogHeight != height ||
+        s_current->m_lastVideoLogPitch != pitch ||
+        s_current->m_lastVideoLogFormat != s_current->m_pixelFormat) {
+        uint32_t sourcePixel = 0;
+        if (s_current->m_pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888)
+            std::memcpy(&sourcePixel, src, sizeof(sourcePixel));
+        else
+            std::memcpy(&sourcePixel, src, sizeof(uint16_t));
+
+        brls::Logger::debug(
+            "[LibretroLoader] video frame: core={} format={} {}x{} pitch={} raw=0x{:08X} rgba=0x{:08X}",
+            static_cast<int>(s_current->m_coreType),
+            static_cast<int>(s_current->m_pixelFormat),
+            width, height, pitch, sourcePixel, vf.pixels.front());
+        s_current->m_lastVideoLogWidth = width;
+        s_current->m_lastVideoLogHeight = height;
+        s_current->m_lastVideoLogPitch = pitch;
+        s_current->m_lastVideoLogFormat = s_current->m_pixelFormat;
+    }
 }
 
 void LibretroLoader::s_audioSampleCallback(int16_t left, int16_t right)
@@ -1326,7 +1387,9 @@ int16_t LibretroLoader::s_inputStateCallback(unsigned port, unsigned device,
                                                unsigned /*index*/, unsigned id)
 {
     if (!s_current || port >= kMaxInputPorts) return 0;
-    if (device != RETRO_DEVICE_JOYPAD && device != RETRO_DEVICE_ANALOG) return 0;
+    // The host currently exposes digital joypad state only.  Do not treat
+    // analog axis ids as button ids (axis 0/1 would otherwise read A/B).
+    if (device != RETRO_DEVICE_JOYPAD) return 0;
     if (id > RETRO_DEVICE_ID_JOYPAD_R3) return 0;
     return s_current->m_buttons[port][id] ? 1 : 0;
 }

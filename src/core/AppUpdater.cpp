@@ -20,15 +20,15 @@ namespace beiklive {
 
 static const char* VERSION_INI_URL = "https://download.nswiki.cn/hahappify/xlcj/version.ini";
 static const char* DOWNLOAD_URL = "https://download.nswiki.cn/hahappify/xlcj/nro/GBAStation.zip";
-static const char* CHANGELOG_BASE_URL = "https://cdn.jsdelivr.net/gh/beiklive/GBAStation_Release@main";
+static const char* CHANGELOG_URL = "https://file.beiklive.top/file/GBAStation/changelog.txt";
 
 // 缓存目录中的 update.nro 路径
 static std::string cacheNroPath() {
     return beiklive::path::cachePath() + "/update.nro";
 }
 
-static std::string cacheNdsStubPath() {
-    return beiklive::path::cachePath() + "/update_nds_stub.nro";
+static std::string cacheNdsCorePath() {
+    return beiklive::path::cachePath() + "/update_nds_core.nro";
 }
 
 static std::string cache3dsStubPath() {
@@ -100,12 +100,6 @@ static std::string trimCopy(const std::string& value) {
     return value.substr(start, end - start);
 }
 
-static std::string normalizeVersionLabel(const std::string& version) {
-    if (!version.empty() && (version[0] == 'v' || version[0] == 'V'))
-        return version.substr(1);
-    return version;
-}
-
 static std::string zipBaseName(const std::string& name) {
     auto pos = name.find_last_of("/\\");
     return pos == std::string::npos ? name : name.substr(pos + 1);
@@ -121,7 +115,7 @@ static std::string normalizeZipPath(const std::string& name) {
 
 static bool extractUpdateFilesFromZip(const std::string& zipPath,
                                       const std::string& mainNroPath,
-                                      const std::string& ndsStubPath,
+                                      const std::string& ndsCorePath,
                                       const std::string& threeDsStubPath) {
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
@@ -168,7 +162,7 @@ static bool extractUpdateFilesFromZip(const std::string& zipPath,
             &zip, static_cast<mz_uint>(mainIndex), mainNroPath.c_str(), 0);
     if (stubIndex >= 0)
         stubOk = mz_zip_reader_extract_to_file(
-            &zip, static_cast<mz_uint>(stubIndex), ndsStubPath.c_str(), 0);
+            &zip, static_cast<mz_uint>(stubIndex), ndsCorePath.c_str(), 0);
     if (threeDsStubIndex >= 0)
         threeDsStubOk = mz_zip_reader_extract_to_file(
             &zip, static_cast<mz_uint>(threeDsStubIndex), threeDsStubPath.c_str(), 0);
@@ -282,7 +276,7 @@ void AppUpdater::check() {
 bool AppUpdater::checkSync() {
     m_info = UpdateInfo{};
     m_info.hasUpdate = false;
-    m_info.changelog = "检测到新版本后，将更新 GBAStation 主程序与 NDS 运行核心。";
+    m_info.changelog = "检测到新版本后，将更新 GBAStation 主程序。NDS 核心由独立项目发布。";
     m_aborted.store(false);
 
     auto ts = std::chrono::duration_cast<std::chrono::seconds>(
@@ -307,10 +301,8 @@ bool AppUpdater::checkSync() {
     m_info.fileSize = fetchContentLength(m_info.downloadUrl);
     m_info.hasUpdate = isRemoteVersionNewer(m_info.version, APP_VERSION);
     if (m_info.hasUpdate) {
-        std::string versionLabel = normalizeVersionLabel(m_info.version);
         std::string changelogUrl = tools::appendDeviceIdParameter(
-            std::string(CHANGELOG_BASE_URL) + "/" + versionLabel
-            + ".txt?t=" + std::to_string(ts));
+            std::string(CHANGELOG_URL) + "?t=" + std::to_string(ts));
         std::string changelogText = fetchUrl(changelogUrl);
         if (!changelogText.empty())
             m_info.changelog = changelogText;
@@ -370,7 +362,7 @@ bool AppUpdater::download(std::function<bool(size_t, size_t)> onProgress) {
     std::filesystem::create_directories(beiklive::path::cachePath(), ec);
     std::filesystem::remove(cacheNroPath(), ec);
     ec.clear();
-    std::filesystem::remove(cacheNdsStubPath(), ec);
+    std::filesystem::remove(cacheNdsCorePath(), ec);
     ec.clear();
     std::filesystem::remove(cache3dsStubPath(), ec);
     ec.clear();
@@ -379,11 +371,11 @@ bool AppUpdater::download(std::function<bool(size_t, size_t)> onProgress) {
     f.write(reinterpret_cast<const char*>(m_downloadedData.data()), m_downloadedData.size());
     f.close();
 
-    if (!extractUpdateFilesFromZip(cacheZipPath(), cacheNroPath(), cacheNdsStubPath(),
+    if (!extractUpdateFilesFromZip(cacheZipPath(), cacheNroPath(), cacheNdsCorePath(),
                                    cache3dsStubPath())) {
         std::filesystem::remove(cacheZipPath(), ec);
         std::filesystem::remove(cacheNroPath(), ec);
-        std::filesystem::remove(cacheNdsStubPath(), ec);
+        std::filesystem::remove(cacheNdsCorePath(), ec);
         std::filesystem::remove(cache3dsStubPath(), ec);
         brls::Logger::error(
             "AppUpdater: 更新包解压失败，缺少或无法解压 GBAStation.nro（Stub 为可选文件）");
@@ -393,7 +385,7 @@ bool AppUpdater::download(std::function<bool(size_t, size_t)> onProgress) {
     std::filesystem::remove(cacheZipPath(), ec);
     m_info.fileSize = m_downloadedData.size();
 
-    const bool hasNdsStub = std::filesystem::exists(cacheNdsStubPath(), ec);
+    const bool hasNdsStub = std::filesystem::exists(cacheNdsCorePath(), ec);
     ec.clear();
     const bool has3dsStub = std::filesystem::exists(cache3dsStubPath(), ec);
     brls::Logger::info(
@@ -415,7 +407,7 @@ bool AppUpdater::install() {
     }
 
     brls::Logger::info("AppUpdater: 安装准备工作完成（NDS Stub={}, 3DS Stub={}）",
-                       std::filesystem::exists(cacheNdsStubPath()) ? "will update" : "keep current",
+                        std::filesystem::exists(cacheNdsCorePath()) ? "will update" : "keep current",
                        std::filesystem::exists(cache3dsStubPath()) ? "will update" : "keep current");
     return true;
 #else
@@ -433,7 +425,7 @@ bool AppUpdater::finishInstall() {
     const std::string ndsStubBackupPath = ndsStubPath + ".update_backup";
     const std::string threeDsStubBackupPath = threeDsStubPath + ".update_backup";
 
-    const bool updateNdsStub = std::filesystem::exists(cacheNdsStubPath());
+    const bool updateNdsStub = std::filesystem::exists(cacheNdsCorePath());
     const bool update3dsStub = std::filesystem::exists(cache3dsStubPath());
 
     romfsExit();
@@ -487,7 +479,7 @@ bool AppUpdater::finishInstall() {
         return false;
     }
 
-    if (updateNdsStub && std::rename(cacheNdsStubPath().c_str(), ndsStubPath.c_str()) != 0) {
+    if (updateNdsStub && std::rename(cacheNdsCorePath().c_str(), ndsStubPath.c_str()) != 0) {
         if (update3dsStub)
             restoreBackup(threeDsStubPath, threeDsStubBackupPath, hadThreeDsStub);
         restoreBackup(ndsStubPath, ndsStubBackupPath, hadNdsStub);
@@ -521,6 +513,11 @@ bool AppUpdater::finishInstall() {
     brls::Logger::info("AppUpdater: 更新文件替换完成 -> main='{}', NDS Stub={}, 3DS Stub={}",
                        nroPath, updateNdsStub ? "updated" : "kept",
                        update3dsStub ? "updated" : "kept");
+
+    // 替换后的 NRO 会在本次运行内被拉起（loader 在启动器退出后才打开它），
+    // 不提交 FAT 写缓存的话读取方会看到旧目录状态：新文件“不存在”、被替换的文件长度不变。
+    if (!beiklive::tools::commitSdCard())
+        brls::Logger::warning("AppUpdater: 提交 SD 卡写缓存失败，重启前可能无法拉起新核心");
     return true;
 #else
     return false;

@@ -65,7 +65,8 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
         return false;
     }
 
-    if (m_gameEntry.path.empty() || !std::filesystem::exists(m_gameEntry.path))
+    const std::string& runtimePath = m_gameEntry.runtimePath.empty() ? m_gameEntry.path : m_gameEntry.runtimePath;
+    if (runtimePath.empty() || !std::filesystem::exists(runtimePath))
     {
         brls::Logger::error("GenesisCore: ROM not found: {}", m_gameEntry.path);
         return false;
@@ -79,23 +80,10 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
     bitmap.data = reinterpret_cast<uint8*>(m_bitmapStorage.data());
 
     gpgx_configure_defaults();
-    const std::string region = GET_SETTING_KEY_STR("core.genesis.region", "auto");
-    int regionCode = 0;
-    if (region == "ntsc-u") regionCode = 1;
-    else if (region == "pal") regionCode = 2;
-    else if (region == "ntsc-j") regionCode = 3;
-    gpgx_apply_config(
-        regionCode,
-        GET_SETTING_KEY_INT("core.genesis.pad_buttons", 6),
-        GET_SETTING_KEY_STR("core.genesis.low_pass", "enabled") == "enabled",
-        GET_SETTING_KEY_INT("core.genesis.low_pass_range", 60),
-        GET_SETTING_KEY_STR("core.genesis.hq_fm", "enabled") == "enabled",
-        GET_SETTING_KEY_STR("core.genesis.hq_psg", "enabled") == "enabled",
-        GET_SETTING_KEY_STR("core.genesis.mono", "disabled") == "enabled",
-        GET_SETTING_KEY_STR("core.genesis.no_sprite_limit", "disabled") == "enabled");
+    applyConfig();
     system_hw = 0;
 
-    std::vector<char> mutablePath(m_gameEntry.path.begin(), m_gameEntry.path.end());
+    std::vector<char> mutablePath(runtimePath.begin(), runtimePath.end());
     mutablePath.push_back('\0');
     if (load_rom(mutablePath.data()) <= 0 || system_hw != SYSTEM_MD)
     {
@@ -127,6 +115,30 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
     brls::Logger::info("GenesisCore: ROM loaded: {} ({}x{} @ {:.2f} fps)",
                        m_gameEntry.path, m_width, m_height, m_fps);
     return true;
+}
+
+void GenesisCore::applyConfig()
+{
+    const std::string region = GET_SETTING_KEY_STR("core.genesis.region", "auto");
+    int regionCode = 0;
+    if (region == "ntsc-u") regionCode = 1;
+    else if (region == "pal") regionCode = 2;
+    else if (region == "ntsc-j") regionCode = 3;
+    gpgx_apply_config(
+        regionCode,
+        GET_SETTING_KEY_INT("core.genesis.pad_buttons", 6),
+        GET_SETTING_KEY_STR("core.genesis.low_pass", "enabled") == "enabled",
+        GET_SETTING_KEY_INT("core.genesis.low_pass_range", 60),
+        GET_SETTING_KEY_STR("core.genesis.hq_fm", "enabled") == "enabled",
+        GET_SETTING_KEY_STR("core.genesis.hq_psg", "enabled") == "enabled",
+        GET_SETTING_KEY_STR("core.genesis.mono", "disabled") == "enabled",
+        GET_SETTING_KEY_STR("core.genesis.no_sprite_limit", "disabled") == "enabled");
+}
+
+void GenesisCore::NotifyConfigUpdated()
+{
+    if (m_ready)
+        applyConfig();
 }
 
 void GenesisCore::Cleanup()

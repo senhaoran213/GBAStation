@@ -541,10 +541,14 @@ namespace beiklive
 
         // 音频设置
         SettingManager->SetDefault(KEY_AUDIO_BUTTON_SFX, ConfigValue(1));
+        SettingManager->SetDefault(KEY_AUDIO_BUTTON_SFX_VOLUME, ConfigValue(100));
+        SettingManager->SetDefault(KEY_AUDIO_MASTER_VOLUME, ConfigValue(100));
         SettingManager->SetDefault(KEY_AUDIO_TARGET_LATENCY_MS, ConfigValue(90));
         SettingManager->SetDefault(KEY_AUDIO_MAX_LATENCY_MS, ConfigValue(180));
         SettingManager->SetDefault(KEY_AUDIO_SYNC_STRENGTH, ConfigValue(0.015f));
         SettingManager->SetDefault(KEY_AUDIO_TRANSITION_FADE_MS, ConfigValue(6));
+        SettingManager->SetDefault(KEY_UI_BG_VIDEO_AUDIO, ConfigValue(0));
+        SettingManager->SetDefault(KEY_UI_BG_VIDEO_VOLUME, ConfigValue(60));
 
         // 快进设置
         SettingManager->SetDefault("fastforward.enabled", ConfigValue(1));
@@ -578,18 +582,12 @@ namespace beiklive
         SettingManager->SetDefault("dc.externalNro.returnPath", ConfigValue(std::string("sdmc:/switch/GBAStation.nro")));
         SettingManager->SetDefault("psp.externalNro.path", ConfigValue(std::string("/GBAStation/core/GBAStationPPSSPPStub.nro")));
         SettingManager->SetDefault("psp.externalNro.returnPath", ConfigValue(std::string("sdmc:/switch/GBAStation.nro")));
-        SettingManager->SetDefault("ps1.externalNro.path", ConfigValue(std::string("/GBAStation/core/GBAStationDuckStationStub.nro")));
-        SettingManager->SetDefault("ps1.externalNro.returnPath", ConfigValue(std::string("sdmc:/switch/GBAStation.nro")));
+        SettingManager->SetDefault("core.ps1.externalNro.path", ConfigValue(std::string("/GBAStation/core/GBAStationDuckStationStub.nro")));
+        SettingManager->SetDefault("core.ps1.externalNro.returnPath", ConfigValue(std::string("sdmc:/switch/GBAStation.nro")));
         SettingManager->SetDefault("saturn.externalNro.path", ConfigValue(std::string("/GBAStation/core/GBAStationYabaSanshiroStub.nro")));
         SettingManager->SetDefault("saturn.externalNro.returnPath", ConfigValue(std::string("sdmc:/switch/GBAStation.nro")));
         SettingManager->SetDefault("dolphin.externalNro.path", ConfigValue(std::string("/GBAStation/core/GBAStationDolphinStub.nro")));
         SettingManager->SetDefault("dolphin.externalNro.returnPath", ConfigValue(std::string("sdmc:/switch/GBAStation.nro")));
-        if (auto pathValue = SettingManager->Get("nds.externalNro.path"))
-        {
-            const auto path = pathValue->AsString().value_or("");
-            if (path == "sdmc:/switch/GBAStationNDSStub.nro")
-                SettingManager->Set("nds.externalNro.path", ConfigValue(std::string("/GBAStation/core/GBAStationNDSStub.nro")));
-        }
         if (auto pathValue = SettingManager->Get("arcade.externalNro.path"))
         {
             const auto path = pathValue->AsString().value_or("");
@@ -663,22 +661,59 @@ namespace beiklive
         SettingManager->SetDefault("core.ppsspp.display_mode", ConfigValue(std::string("Display")));
         SettingManager->SetDefault("core.ppsspp.display_size", ConfigValue(std::string("16:9")));
 
-        SettingManager->SetDefault("core.fbneo.display_mode", ConfigValue(std::string("Integer")));
+        SettingManager->SetDefault("core.fbneo.display_mode", ConfigValue(std::string("Display")));
         SettingManager->SetDefault("core.fbneo.display_size", ConfigValue(std::string("Auto")));
         SettingManager->SetDefault("core.fbneo.shader_type", ConfigValue(std::string("None")));
 
         SettingManager->SetDefault("core.flycast.display_mode", ConfigValue(std::string("Display")));
         SettingManager->SetDefault("core.flycast.display_size", ConfigValue(std::string("4:3")));
 
-        // DuckStation Stub 直接读取 ps1.*，确保启动器设置即时生效。
-        SettingManager->SetDefault("ps1.renderer", ConfigValue(std::string("deko3D")));
-        SettingManager->SetDefault("ps1.resolutionScale", ConfigValue(1));
-        SettingManager->SetDefault("ps1.aspectRatio", ConfigValue(std::string("Auto (Game Native)")));
-        SettingManager->SetDefault("ps1.fastBoot", ConfigValue(1));
+        // DuckStation Stub reads the shared core.ps1.* namespace.
+        SettingManager->SetDefault("core.ps1.renderer", ConfigValue(std::string("deko3D")));
+        SettingManager->SetDefault("core.ps1.resolutionScale", ConfigValue(1));
+        SettingManager->SetDefault("core.ps1.aspectRatio", ConfigValue(std::string("Auto (Game Native)")));
+        SettingManager->SetDefault("core.ps1.fastBoot", ConfigValue(1));
+
+        // Migrate the old flat ps1.* core namespace once. Input mappings and
+        // hotkeys intentionally stay under ps1.* and are not included here.
+        static constexpr const char* kLegacyPs1CoreKeys[] = {
+            "externalNro.path", "externalNro.returnPath", "aspectRatio", "bufferMS",
+            "createSaveStateBackups", "cropMode", "deinterlacingMode", "emulationSpeed",
+            "enable8MBRAM", "enableCheats", "executionMode", "fastBoot", "fastmemMode",
+            "logLevel", "multisamples", "outputLatencyMS", "outputMuted", "overclockEnable",
+            "pgxpEnable", "pgxpTextureCorrection", "readSpeedup", "readaheadSectors", "region",
+            "renderer", "resolutionScale", "runaheadFrameCount", "saveStateOnExit", "showFPS",
+            "syncToHostRefreshRate", "trueColor", "ttyLogging", "vsync", "widescreenHack",
+        };
+        for (const char* suffix : kLegacyPs1CoreKeys)
+        {
+            const std::string oldKey = std::string("ps1.") + suffix;
+            const std::string newKey = std::string("core.ps1.") + suffix;
+            if (!SettingManager->Contains(newKey))
+            {
+                if (const auto value = SettingManager->Get(oldKey); value.has_value())
+                    SettingManager->Set(newKey, *value);
+            }
+        }
 
         SettingManager->SetDefault("core.saturn.emulated_bios", ConfigValue(0));
         SettingManager->SetDefault("core.saturn.frame_skip", ConfigValue(0));
         SettingManager->SetDefault("core.saturn.resolution_mode", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.frame_limit", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.video_filter", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.polygon_generation", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.aspect_ratio", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.rotate_screen", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.rbg_resolution", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.rbg_compute_shader", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.extend_internal_memory", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.sound_engine", ConfigValue(1));
+        SettingManager->SetDefault("core.saturn.scsp_sync_per_frame", ConfigValue(1));
+        SettingManager->SetDefault("core.saturn.scsp_sync_time_mode", ConfigValue(1));
+        SettingManager->SetDefault("core.saturn.cpu_sync_per_line", ConfigValue(1));
+        SettingManager->SetDefault("core.saturn.cartridge", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.region", ConfigValue(0));
+        SettingManager->SetDefault("core.saturn.video_format", ConfigValue(0));
         SettingManager->SetDefault("core.dolphin.dolphin_cpu_clock_rate", ConfigValue(std::string("1.0")));
         SettingManager->SetDefault("core.dolphin.dolphin_widescreen", ConfigValue(std::string("enabled")));
         SettingManager->SetDefault("core.dolphin.dolphin_enable_rumble", ConfigValue(std::string("enabled")));
@@ -718,6 +753,55 @@ namespace beiklive
         SettingManager->SetDefault("core.melonds_dldi_path", ConfigValue(std::string("")));
         SettingManager->SetDefault("core.melonds_randomize_mac", ConfigValue(0));
         SettingManager->SetDefault("core.melonds_firmware_language", ConfigValue(-1));
+
+        // DraStic external NDS core (GBAStationNDSStub.nro).  Key names match
+        // the host's import_launcher_core_config() mapping table exactly.
+        SettingManager->SetDefault("core.drastic.layout", ConfigValue(std::string("horizontal")));
+        SettingManager->SetDefault("core.drastic.rotation", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.screen_gap", ConfigValue(8));
+        SettingManager->SetDefault("core.drastic.integer_scale", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.video_filter", ConfigValue(std::string("nearest")));
+        SettingManager->SetDefault("core.drastic.volume", ConfigValue(100));
+        SettingManager->SetDefault("core.drastic.microphone_source", ConfigValue(std::string("noise")));
+        SettingManager->SetDefault("core.drastic.mic_enabled", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.mic_level", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.vibration", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.motion", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.stylus_mode", ConfigValue(std::string("stick")));
+        SettingManager->SetDefault("core.drastic.stylus_speed", ConfigValue(8));
+        SettingManager->SetDefault("core.drastic.frameskip", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.frameskip_type", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.frameskip_safe", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.fastforward_speed", ConfigValue(5));
+        SettingManager->SetDefault("core.drastic.audio_latency", ConfigValue(2));
+        SettingManager->SetDefault("core.drastic.cpu_threads", ConfigValue(3));
+        SettingManager->SetDefault("core.drastic.threaded_3d", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.hires_3d", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.sound_enabled", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.cheats_enabled", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.rtc_system_time", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.preload_roms", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.show_fps", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.autosave_interval", ConfigValue(300));
+        SettingManager->SetDefault("core.drastic.autofire_speed", ConfigValue(2));
+        SettingManager->SetDefault("core.drastic.slot2_type", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.backup_in_savestates", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.ignore_gamecard_limit", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.use_16bit_color", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.auto_trim", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.fix_main_engine_screen", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.disable_edge_marking", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.lua_enabled", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.blend", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.raw_save_format", ConfigValue(1));
+        SettingManager->SetDefault("core.drastic.firmware_nickname", ConfigValue(std::string("Switch")));
+        SettingManager->SetDefault("core.drastic.firmware_language", ConfigValue(-1));
+        SettingManager->SetDefault("core.drastic.firmware_color", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.firmware_birthday_month", ConfigValue(6));
+        SettingManager->SetDefault("core.drastic.firmware_birthday_day", ConfigValue(6));
+        SettingManager->SetDefault("core.drastic.lsfg_flow_scale", ConfigValue(1.0f));
+        SettingManager->SetDefault("core.drastic.lsfg_performance", ConfigValue(0));
+        SettingManager->SetDefault("core.drastic.lsfg_enabled", ConfigValue(0));
 
         SettingManager->SetDefault("core.genesis.region", ConfigValue(std::string("auto")));
         SettingManager->SetDefault("core.genesis.pad_buttons", ConfigValue(6));
@@ -764,7 +848,7 @@ namespace beiklive
         SettingManager->SetDefault("cheat.dir", ConfigValue(std::string("")));
 
         // 按键绑定默认值。GBA 保持无前缀；GBC/GB 独立前缀首次默认继承旧的无前缀配置。
-        const std::string mappingPrefixes[] = {"", "gbc.", "gb.", "nes.", "sfc.", "nds.", "3ds.", "md.", "arcade.", "dc.", "psp.", "ps1.", "saturn.", "dolphin."};
+        const std::string mappingPrefixes[] = {"", "gbc.", "gb.", "nes.", "sfc.", "nds.", "3ds.", "md.", "arcade.", "dc.", "psp.", "saturn.", "dolphin."};
         for (const auto& prefix : mappingPrefixes)
         {
             const unsigned platformMask = beiklive::input_mapping::platformMaskForPrefix(prefix);
@@ -847,11 +931,60 @@ namespace beiklive
         // installations retain any mappings the user already chose.
         SettingManager->SetDefault("saturn.handle.fastforward", ConfigValue(std::string("PAD_RSB")));
         SettingManager->SetDefault("saturn.hotkey.menu.pad", ConfigValue(std::string("PAD_LSB")));
-        SettingManager->SetDefault("saturn.hotkey.quicksave.pad", ConfigValue(std::string("PAD_LT+PAD_RT")));
-        SettingManager->SetDefault("saturn.hotkey.quickload.pad", ConfigValue(std::string("PAD_LB+PAD_RB")));
+        // No quick save/load hotkeys for Saturn: the core reads only
+        // saturn.handle.fastforward and saturn.hotkey.menu.pad, and save states are
+        // handled by the in-game menu's slot panels.  Clear anything an older
+        // build wrote for them.
+        SettingManager->Remove("saturn.hotkey.quicksave.pad");
+        SettingManager->Remove("saturn.hotkey.quickload.pad");
         // 3DS 独立运行时不支持倒带，清理旧版本可能写入的无效绑定。
         SettingManager->Remove("3ds.handle.rewind");
+        // Saturn 核心只实现 快进/菜单/快速保存/快速读取 四个功能键，也没有
+        // Select 键和连发；清掉旧版本可能写进去的无效绑定，避免按键映射页
+        // 显示一个核心根本不读的键。
+        SettingManager->Remove("saturn.handle.rewind");
+        SettingManager->Remove("saturn.handle.select");
+        SettingManager->Remove("saturn.hotkey.screenshot.pad");
+        SettingManager->Remove("saturn.hotkey.mute.pad");
+        SettingManager->Remove("saturn.hotkey.pause.pad");
+        SettingManager->Remove("saturn.handle.a_turbo");
+        SettingManager->Remove("saturn.handle.b_turbo");
+        // ZL/ZR no longer alias Saturn L/R (they carry Saturn Z/C now), and the
+        // L2/R2 keys are not read any more.
+        SettingManager->Remove("saturn.handle.l2");
+        SettingManager->Remove("saturn.handle.r2");
+        // The Saturn mapping is one-to-one with the Switch pad now (A = PAD_A,
+        // L = PAD_LB, ...).  Drop bindings that are still the previous defaults so
+        // the new scheme applies, but keep anything the user changed by hand.
+        {
+            struct LegacySaturnBinding
+            {
+                const char* key;
+                const char* oldDefault;
+            };
+            static const LegacySaturnBinding kLegacy[] = {
+                {"saturn.handle.a", "PAD_B"},
+                {"saturn.handle.b", "PAD_A"},
+                {"saturn.handle.c", "PAD_X"},
+                {"saturn.handle.x", "PAD_Y"},
+                {"saturn.handle.y", "PAD_LB"},
+                {"saturn.handle.z", "PAD_RB"},
+                {"saturn.handle.l", "PAD_LT"},
+                {"saturn.handle.r", "PAD_RT"},
+            };
+            for (const LegacySaturnBinding& legacy : kLegacy)
+            {
+                auto current = SettingManager->Get(legacy.key);
+                if (!current.has_value())
+                    continue;
+                auto text = current->AsString();
+                if (text.has_value() && *text == legacy.oldDefault)
+                    SettingManager->Remove(legacy.key);
+            }
+        }
         SettingManager->Remove("core.azahar.swap_screens");
+        // Keep clearing the legacy 3DS mapping, which has no matching action.
+        SettingManager->Remove("3ds.hotkey.mic_input.pad");
         for (const char* prefix : {"nds.", "3ds."})
         {
             for (const auto& entry : beiklive::input_mapping::kPointerHotkeys)
@@ -862,6 +995,12 @@ namespace beiklive
                     beiklive::input_mapping::makeKey(prefix, entry.key),
                     ConfigValue(std::string(entry.defaultValue)));
             }
+        }
+        for (const auto& entry : beiklive::input_mapping::kNdsSpecialHotkeys)
+        {
+            SettingManager->SetDefault(
+                beiklive::input_mapping::makeKey("nds.", entry.key),
+                ConfigValue(std::string(entry.defaultValue)));
         }
 
         // 摇杆输入设置

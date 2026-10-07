@@ -414,6 +414,24 @@ namespace beiklive
 
     GameMenuView::~GameMenuView()
     {
+        if (m_configSaveDelayId)
+            brls::cancelDelay(m_configSaveDelayId);
+        if (m_configSavePending && beiklive::SettingManager)
+            beiklive::SettingManager->Save();
+    }
+
+    void GameMenuView::requestConfigSave()
+    {
+        m_configSavePending = true;
+        if (m_configSaveDelayId)
+            brls::cancelDelay(m_configSaveDelayId);
+        m_configSaveDelayId = brls::delay(180, [this]() {
+            m_configSaveDelayId = 0;
+            if (!m_configSavePending || !beiklive::SettingManager)
+                return;
+            m_configSavePending = false;
+            beiklive::SettingManager->Save();
+        });
     }
 
     void GameMenuView::addCoreDisplaySettingView(brls::View* view)
@@ -1729,6 +1747,24 @@ namespace beiklive
         box->setPadding(10.f, 20.f, 20.f, 20.f);
 
         {
+            std::vector<std::string> ffModeLabels = {L("按住"), L("切换")};
+            int curModeIdx = GET_SETTING_KEY_STR("fastforward.mode", "hold") == "toggle" ? 1 : 0;
+            auto *ffModeCell = new beiklive::SelectorButton();
+            ffModeCell->setText(L("快进触发模式"));
+            ffModeCell->setOptions(ffModeLabels, curModeIdx);
+            ffModeCell->setOnSelect(
+                [this](int i) {
+                    if (beiklive::SettingManager) {
+                        beiklive::SettingManager->Set("fastforward.mode",
+                                                      beiklive::ConfigValue(i == 1 ? "toggle" : "hold"));
+                        requestConfigSave();
+                    }
+                });
+            box->addView(ffModeCell);
+            box->addView(makeHint(L("按住：长按快进键触发  |  切换：按一次保持快进，再按一次解除")));
+        }
+
+        {
             // ── 快进速度快速调整 ──
             auto *ffHdr = new brls::Header();
             ffHdr->setTitle(L("快进速度"));
@@ -1744,9 +1780,12 @@ namespace beiklive
             ffCell->setText(L("快进倍率"));
             ffCell->setOptions(ffLabels, ffIdx);
             ffCell->setOnSelect(
-                [](int i) {
+                [this](int i) {
                     static const float vals[] = {0.1f, 0.5f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
-                    if (i >= 0 && i < 15) SET_SETTING_KEY_FLOAT("fastforward.multiplier", vals[i]);
+                    if (i >= 0 && i < 15 && beiklive::SettingManager) {
+                        beiklive::SettingManager->Set("fastforward.multiplier", beiklive::ConfigValue(vals[i]));
+                        requestConfigSave();
+                    }
                 });
             box->addView(ffCell);
             box->addView(makeHint(L("小于1倍时可在快进触发时实现慢动作效果")));
@@ -1769,9 +1808,10 @@ namespace beiklive
                 solarCell->setText(L("太阳传感器等级"));
                 solarCell->setOptions(solarLabels, curSolar);
                 solarCell->setOnSelect(
-                    [](int idx) {
-                        if (idx >= 0 && idx <= 10) {
-                            SET_SETTING_KEY_STR("core.mgba_solar_sensor_level", std::to_string(idx));
+                    [this](int idx) {
+                        if (idx >= 0 && idx <= 10 && beiklive::SettingManager) {
+                            beiklive::SettingManager->Set("core.mgba_solar_sensor_level", beiklive::ConfigValue(std::to_string(idx)));
+                            requestConfigSave();
                             GameSignal::instance().requestConfigUpdate();
                         }
                     });
@@ -1920,11 +1960,11 @@ namespace beiklive
 
             auto closeAct = [this](brls::View *)
             {
-                beiklive::GameDB->set(m_gameEntry.path, "shaderEnabled", nlohmann::json(m_gameEntry.shaderEnabled));
-                beiklive::GameDB->set(m_gameEntry.path, "shaderPath", nlohmann::json(m_gameEntry.shaderPath));
-                beiklive::GameDB->set(m_gameEntry.path, "shaderParaPath", nlohmann::json(m_gameEntry.shaderParaPath));
-                beiklive::GameDB->set(m_gameEntry.path, "shaderParaNames", nlohmann::json(m_gameEntry.shaderParaNames));
-                beiklive::GameDB->set(m_gameEntry.path, "shaderParaValues", nlohmann::json(m_gameEntry.shaderParaValues));
+                beiklive::GameDB->set(m_gameEntry.path, "shaderEnabled", nlohmann::json(m_gameEntry.shaderEnabled), false);
+                beiklive::GameDB->set(m_gameEntry.path, "shaderPath", nlohmann::json(m_gameEntry.shaderPath), false);
+                beiklive::GameDB->set(m_gameEntry.path, "shaderParaPath", nlohmann::json(m_gameEntry.shaderParaPath), false);
+                beiklive::GameDB->set(m_gameEntry.path, "shaderParaNames", nlohmann::json(m_gameEntry.shaderParaNames), false);
+                beiklive::GameDB->set(m_gameEntry.path, "shaderParaValues", nlohmann::json(m_gameEntry.shaderParaValues), false);
                 beiklive::GameDB->flush();
 
                 {
@@ -2235,6 +2275,19 @@ namespace beiklive
             this->addView(m_CustomSidePanel);
         }
 
+        {
+            auto *noSyncCell = new brls::BooleanCell();
+            noSyncCell->init(L("锁定本游戏配置"), m_gameEntry.noSync != 0,
+                             [this](bool v) {
+                                 m_gameEntry.noSync = v ? 1 : 0;
+                                 if (beiklive::GameDB)
+                                     beiklive::GameDB->set(m_gameEntry.path, "noSync",
+                                                           nlohmann::json(v ? 1 : 0));
+                             });
+            box->addView(noSyncCell);
+            box->addView(makeHint(L("开启后锁定本游戏配置，同平台游戏的同步画面/遮罩/着色器操作将跳过本游戏")));
+        }
+
         // ── 同步设置到其他游戏 ──
         {
             auto *syncHdr = new brls::Header();
@@ -2469,6 +2522,7 @@ namespace beiklive
         for (auto& game : games) {
             if (game.platform != platform) continue;
             if (game.path == m_gameEntry.path) continue;
+            if (game.noSync != 0) continue;
             game.displayMode      = m_gameEntry.displayMode;
             game.integerAspectRatio = m_gameEntry.integerAspectRatio;
             game.customScale      = m_gameEntry.customScale;
@@ -2492,6 +2546,7 @@ namespace beiklive
         for (auto& game : games) {
             if (game.platform != platform) continue;
             if (game.path == m_gameEntry.path) continue;
+            if (game.noSync != 0) continue;
             game.overlayPath    = m_gameEntry.overlayPath;
             game.overlayEnabled = m_gameEntry.overlayEnabled;
             beiklive::GameDB->upsertByPath(game);
@@ -2516,6 +2571,7 @@ namespace beiklive
         for (auto& game : games) {
             if (game.platform != platform) continue;
             if (game.path == m_gameEntry.path) continue;
+            if (game.noSync != 0) continue;
             game.shaderEnabled   = m_gameEntry.shaderEnabled;
             game.shaderPath      = m_gameEntry.shaderPath;
             game.shaderParaPath   = m_gameEntry.shaderParaPath;

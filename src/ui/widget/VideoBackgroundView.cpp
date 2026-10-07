@@ -15,7 +15,8 @@
 #include <vector>
 
 #include "core/common.h"
-
+#include "ui/utils/BackgroundAudioPlayer.hpp"
+#include "ui/utils/BKAudioPlayer.hpp"
 extern "C"
 {
 #include <libavcodec/avcodec.h>
@@ -24,7 +25,11 @@ extern "C"
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/samplefmt.h>
+#include <libavutil/opt.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
 }
 
 namespace beiklive
@@ -75,6 +80,7 @@ namespace beiklive
         // modal obscures every consumer, preventing a return from consuming a
         // burst of "overdue" queued frames.
         double presentationElapsed = 0.0;
+        std::atomic_bool audioReady{false};
         std::chrono::steady_clock::time_point lastPresentationTick{};
 
         // One producer (decoder) and one consumer (UI). FFmpeg and NanoVG
@@ -85,6 +91,7 @@ namespace beiklive
         size_t readIndex = 0;
         size_t writeIndex = 0;
         size_t queued = 0;
+
     };
 
     namespace
@@ -100,6 +107,36 @@ namespace beiklive
         std::shared_ptr<SharedVideo> g_activeVideo;
         uint64_t g_activeVideoGeneration = 0;
         std::atomic_bool g_videoPlaybackPaused{false};
+        // Audio decoding can still be finishing an FFmpeg packet while the
+        // GamePage transition stops the output device. Keep a separate gate
+        // so that such a packet cannot start the background player again.
+        std::atomic_bool g_backgroundAudioSuspended{false};
+        BackgroundAudioPlayer g_backgroundAudio;
+        std::mutex g_backgroundAudioMutex;
+
+        void stopBackgroundAudio()
+        {
+            std::lock_guard<std::mutex> lock(g_backgroundAudioMutex);
+            g_backgroundAudio.stop();
+        }
+
+        bool ensureBackgroundAudio()
+        {
+            std::lock_guard<std::mutex> lock(g_backgroundAudioMutex);
+            if (g_backgroundAudioSuspended.load(std::memory_order_acquire) ||
+                g_videoPlaybackPaused.load(std::memory_order_acquire) ||
+                !GET_SETTING_KEY_INT(SettingKey::KEY_UI_BG_VIDEO_AUDIO, 0))
+                return false;
+            if (!g_backgroundAudio.isRunning()) {
+                if (BKAudioPlayer::isAnyPlaying())
+                    return false;
+                if (!g_backgroundAudio.start(48000, 2))
+                    return false;
+            }
+            g_backgroundAudio.setVolume(static_cast<float>(std::clamp(
+                GET_SETTING_KEY_INT(SettingKey::KEY_UI_BG_VIDEO_VOLUME, 60), 0, 200)) / 100.0f);
+            return g_backgroundAudio.isRunning();
+        }
 
 #ifdef __SWITCH__
         // Streaming no longer duplicates the file in RAM. Keep a generous
@@ -263,18 +300,24 @@ namespace beiklive
             AVIOContext* io = nullptr;
             AVFormatContext* format = nullptr;
             AVCodecContext* codec = nullptr;
+            AVCodecContext* audioCodec = nullptr;
             AVFrame* frame = nullptr;
+            AVFrame* audioFrame = nullptr;
             AVPacket* packet = nullptr;
             SwsContext* sws = nullptr;
+            SwrContext* swr = nullptr;
             uint8_t* ioBuffer = nullptr;
 
             const auto cleanup = [&]() {
                 sws_freeContext(sws);
                 av_packet_free(&packet);
                 av_frame_free(&frame);
+                av_frame_free(&audioFrame);
                 avcodec_free_context(&codec);
+                avcodec_free_context(&audioCodec);
                 avformat_close_input(&format);
                 avio_context_free(&io);
+                swr_free(&swr);
             };
             const auto fail = [&](const char* stage, int error = 0) {
                 if (video->stop.load(std::memory_order_acquire)) {
@@ -344,10 +387,13 @@ namespace beiklive
                                    std::chrono::steady_clock::now() - loadStarted).count(),
                                input.bytesRead / 1024);
             int streamIndex = -1;
+            int audioStreamIndex = -1;
             for (unsigned int index = 0; index < format->nb_streams; ++index) {
                 if (format->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
                     streamIndex = static_cast<int>(index);
-                    break;
+                } else if (format->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
+                           audioStreamIndex < 0) {
+                    audioStreamIndex = static_cast<int>(index);
                 }
             }
             if (streamIndex < 0) {
@@ -375,10 +421,38 @@ namespace beiklive
                 return;
             }
             frame = av_frame_alloc();
+            audioFrame = av_frame_alloc();
             packet = av_packet_alloc();
-            if (!frame || !packet) {
+            if (!frame || !audioFrame || !packet) {
                 fail("FFmpeg frame allocation");
                 return;
+            }
+
+            if (audioStreamIndex >= 0) {
+                AVStream* audioStream = format->streams[audioStreamIndex];
+                const AVCodec* audioDecoder = avcodec_find_decoder(audioStream->codecpar->codec_id);
+                if (audioDecoder) {
+                    audioCodec = avcodec_alloc_context3(audioDecoder);
+                    if (audioCodec && avcodec_parameters_to_context(audioCodec, audioStream->codecpar) >= 0 &&
+                        avcodec_open2(audioCodec, audioDecoder, nullptr) >= 0 &&
+                        audioCodec->sample_rate > 0 && audioCodec->ch_layout.nb_channels > 0) {
+                        AVChannelLayout outputLayout = AV_CHANNEL_LAYOUT_STEREO;
+                        if (swr_alloc_set_opts2(&swr, &outputLayout, AV_SAMPLE_FMT_S16, 48000,
+                                                &audioCodec->ch_layout, audioCodec->sample_fmt,
+                                                audioCodec->sample_rate, 0, nullptr) >= 0 &&
+                            swr_init(swr) >= 0) {
+                            video->audioReady.store(true, std::memory_order_release);
+                            brls::Logger::info("MP4: audio decoder opened '{}': {} @ {}Hz, {} channels",
+                                               video->path, avcodec_get_name(audioCodec->codec_id),
+                                               audioCodec->sample_rate, audioCodec->ch_layout.nb_channels);
+                        } else {
+                            swr_free(&swr);
+                            avcodec_free_context(&audioCodec);
+                        }
+                    } else {
+                        avcodec_free_context(&audioCodec);
+                    }
+                }
             }
 
             const AVRational rate = av_guess_frame_rate(format, stream, nullptr);
@@ -479,6 +553,8 @@ namespace beiklive
                         segmentStart = false;
                     }
                     const double timelinePts = loopOffset + std::max(0.0, rawPts - rawSegmentStart);
+                    const bool queueFirstFrame = !video->firstFrameQueued.load(
+                        std::memory_order_acquire);
                     std::vector<uint8_t> rgba(static_cast<size_t>(outputWidth) * outputHeight * 4);
                     uint8_t* destination[] = {rgba.data(), nullptr, nullptr, nullptr};
                     int stride[] = {outputWidth * 4, 0, 0, 0};
@@ -504,11 +580,16 @@ namespace beiklive
                     return;
                 }
                 if (result == AVERROR_EOF) {
-                    if (av_seek_frame(format, streamIndex, 0, AVSEEK_FLAG_BACKWARD) < 0) {
+                    if (av_seek_frame(format, -1, 0, AVSEEK_FLAG_BACKWARD) < 0) {
                         fail("loop seek");
                         return;
                     }
                     avcodec_flush_buffers(codec);
+                    if (audioCodec) {
+                        avcodec_flush_buffers(audioCodec);
+                        if (swr)
+                            swr_convert(swr, nullptr, 0, nullptr, 0);
+                    }
                     av_packet_unref(packet);
                     sentEof = false;
                     segmentStart = true;
@@ -525,6 +606,35 @@ namespace beiklive
                             fail("decoder drain", result);
                             return;
                         }
+                    }
+                    continue;
+                }
+                if (packet->stream_index == audioStreamIndex && audioCodec && swr) {
+                    result = avcodec_send_packet(audioCodec, packet);
+                    av_packet_unref(packet);
+                    if (result < 0 && result != AVERROR(EAGAIN)) {
+                        fail("audio packet decode", result);
+                        return;
+                    }
+                    while ((result = avcodec_receive_frame(audioCodec, audioFrame)) == 0) {
+                        const int outputSamples = static_cast<int>(av_rescale_rnd(
+                            swr_get_delay(swr, audioCodec->sample_rate) + audioFrame->nb_samples,
+                            48000, audioCodec->sample_rate, AV_ROUND_UP));
+                        if (outputSamples <= 0)
+                            continue;
+                        std::vector<int16_t> pcm(static_cast<size_t>(outputSamples) * 2);
+                        uint8_t* output[] = {reinterpret_cast<uint8_t*>(pcm.data()), nullptr};
+                        const int converted = swr_convert(swr, output, outputSamples,
+                                                          const_cast<const uint8_t* const*>(audioFrame->extended_data),
+                                                          audioFrame->nb_samples);
+                        if (converted <= 0 || !ensureBackgroundAudio())
+                            continue;
+                        pcm.resize(static_cast<size_t>(converted) * 2);
+                        g_backgroundAudio.pushSamples(pcm.data(), static_cast<size_t>(converted));
+                    }
+                    if (result != AVERROR(EAGAIN) && result != AVERROR_EOF) {
+                        fail("audio frame decode", result);
+                        return;
                     }
                     continue;
                 }
@@ -578,6 +688,8 @@ namespace beiklive
         {
             if (!video)
                 return;
+            if (g_activeVideo == video)
+                stopBackgroundAudio();
             video->stop.store(true, std::memory_order_release);
             video->queueWake.notify_all();
 
@@ -651,6 +763,7 @@ namespace beiklive
         // A page may still own a stale view after a new media type was
         // selected. Retire the cached player asynchronously: joining FFmpeg
         // on the UI thread makes a background switch visibly stall.
+        stopBackgroundAudio();
         for (auto& [path, video] : g_videoCache) {
             (void)path;
             retireVideo(std::move(video));
@@ -664,6 +777,10 @@ namespace beiklive
         // main() calls this while the NanoVG context still belongs to the UI
         // thread. Unlike a background replacement, application exit may wait
         // briefly for in-flight storage I/O to finish.
+        // Set the gate before stopping the device so a decoder that is
+        // finishing an audio packet cannot recreate the output during exit.
+        g_backgroundAudioSuspended.store(true, std::memory_order_release);
+        stopBackgroundAudio();
         for (auto& [path, video] : g_videoCache) {
             (void)path;
             if (!video)
@@ -700,6 +817,15 @@ namespace beiklive
             video->queueWake.notify_all();
         }
         brls::Logger::info("MP4: shared background playback {}", paused ? "paused" : "resumed");
+    }
+
+    void VideoBackgroundView::setSharedAudioSuspended(bool suspended)
+    {
+        g_backgroundAudioSuspended.store(suspended, std::memory_order_release);
+        if (suspended)
+            stopBackgroundAudio();
+        else if (!g_videoPlaybackPaused.load(std::memory_order_acquire) && g_activeVideo)
+            ensureBackgroundAudio();
     }
 
     bool VideoBackgroundView::load(const std::string& path)
@@ -746,6 +872,9 @@ namespace beiklive
         }
 
         const auto video = g_activeVideo;
+        if (!GET_SETTING_KEY_INT(SettingKey::KEY_UI_BG_VIDEO_AUDIO, 0) &&
+            g_backgroundAudio.isRunning())
+            stopBackgroundAudio();
         if (!video || getVisibility() != brls::Visibility::VISIBLE ||
             video->state.load(std::memory_order_acquire) != VideoState::Ready)
             return;
@@ -792,6 +921,10 @@ namespace beiklive
         const float drawX = x + (width - drawWidth) * 0.5f;
         const float drawY = y + (height - drawHeight) * 0.5f;
         nvgSave(vg);
+        // View::setAlpha() is not applied automatically to custom NanoVG
+        // drawing. Use the inherited alpha so Box can fade the first startup
+        // frame in instead of presenting it at full opacity immediately.
+        nvgGlobalAlpha(vg, getAlpha());
         nvgIntersectScissor(vg, x, y, width, height);
         nvgBeginPath(vg);
         nvgRect(vg, drawX, drawY, drawWidth, drawHeight);

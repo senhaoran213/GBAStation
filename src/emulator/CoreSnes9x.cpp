@@ -14,7 +14,7 @@ bool CoreSnes9x::SetupGame(beiklive::GameEntry GameEntry)
     _initConfig();
     if (_loadCore())
     {
-        if (_loadRom(m_gameEntry.path))
+        if (_loadRom(m_gameEntry.runtimePath.empty() ? m_gameEntry.path : m_gameEntry.runtimePath))
         {
             m_core.reset();
             _loadSram();
@@ -107,6 +107,10 @@ bool CoreSnes9x::_loadCore()
         m_core.unload();
         return false;
     }
+    // Keep input setup explicit across Snes9x variants.  Relying on the
+    // core's default port device can leave a port as RETRO_DEVICE_NONE.
+    m_core.setControllerPortDevice(0, RETRO_DEVICE_JOYPAD);
+    m_core.setControllerPortDevice(1, RETRO_DEVICE_JOYPAD);
     return true;
 }
 
@@ -139,13 +143,19 @@ bool CoreSnes9x::_loadRom(const std::string &romPath)
 
 bool CoreSnes9x::_loadSram()
 {
-    return core_utils::loadSram(m_core, m_gameEntry.savePath,
+    const std::string savePath = m_gameEntry.savePath.empty()
+        ? beiklive::tools::defaultGameSavePath(m_gameEntry.platform, m_gameEntry.path)
+        : m_gameEntry.savePath;
+    return core_utils::loadSram(m_core, savePath,
         beiklive::tools::getFileNameWithoutExtension(m_gameEntry.path));
 }
 
 bool CoreSnes9x::_saveSram()
 {
-    return core_utils::saveSram(m_core, m_gameEntry.savePath,
+    const std::string savePath = m_gameEntry.savePath.empty()
+        ? beiklive::tools::defaultGameSavePath(m_gameEntry.platform, m_gameEntry.path)
+        : m_gameEntry.savePath;
+    return core_utils::saveSram(m_core, savePath,
         beiklive::tools::getFileNameWithoutExtension(m_gameEntry.path));
 }
 

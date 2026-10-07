@@ -127,7 +127,7 @@ public:
 
     // ---- 输入 -------------------------------------------------------
 
-    /// 各按钮按下状态，索引 = RETRO_DEVICE_ID_JOYPAD_*。
+    /// 数字手柄按键状态，索引 = RETRO_DEVICE_ID_JOYPAD_*。
     void setButtonState(unsigned port, unsigned id, bool pressed);
     bool getButtonState(unsigned port, unsigned id) const;
 
@@ -202,10 +202,15 @@ private:
     retro_pixel_format   m_pixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
     bool m_coreReady  = false;
     bool m_gameLoaded = false;
+    bool m_loggedFirstRun = false;
 
     // ---- 视频帧存储 -------------------------------------------------
     mutable std::mutex   m_videoMutex;
     VideoFrame           m_videoFrame;
+    unsigned             m_lastVideoLogWidth  = 0;
+    unsigned             m_lastVideoLogHeight = 0;
+    size_t               m_lastVideoLogPitch  = 0;
+    retro_pixel_format   m_lastVideoLogFormat = RETRO_PIXEL_FORMAT_0RGB1555;
 
     // ---- 音频环形缓冲区 ---------------------------------------------
     mutable std::mutex       m_audioMutex;

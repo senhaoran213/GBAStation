@@ -1,4 +1,5 @@
 #include "core/forwarder/ForwarderInstaller.hpp"
+#include "core/forwarder/ForwarderTypes.hpp"
 
 #include "core/common.h"
 
@@ -22,7 +23,8 @@ namespace sphaira
     Result installForwarder(const std::string& nroPath, const std::string& args,
                             const std::string& name, const std::string& author,
                             const std::vector<u8>& icon,
-                            const std::string& legacyArgs);
+                            ForwarderAddressSpace addressSpace = ForwarderAddressSpace::Bit36,
+                            ForwarderCoreMode coreMode = ForwarderCoreMode::Three);
 }
 #endif
 
@@ -223,7 +225,7 @@ InstallResult installGame(const beiklive::GameEntry& entry)
             "psp.externalNro.path", "/GBAStation/core/GBAStationPPSSPPStub.nro"));
     else if (isPs1)
         nroPath = normalizeNroPath(GET_SETTING_KEY_STR(
-            "ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro"));
+            "core.ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro"));
     else if (isSaturn)
         nroPath = normalizeNroPath(GET_SETTING_KEY_STR(
             "saturn.externalNro.path", "/GBAStation/core/GBAStationYabaSanshiroStub.nro"));
@@ -231,20 +233,12 @@ InstallResult installGame(const beiklive::GameEntry& entry)
         nroPath = normalizeNroPath(GET_SETTING_KEY_STR(
             "dolphin.externalNro.path", "/GBAStation/core/GBAStationDolphinStub.nro"));
 
-    std::string args = quoteArgument(entry.path);
-    std::string legacyArgs;
-    if (isNds || isThreeDs)
-    {
-        legacyArgs = args + " --return " + quoteArgument(mainNro);
-        args += " --exit-to-home";
-    }
-    else if (isArcade || isDreamcast || isPsp || isPs1 || isSaturn || isDolphin)
-    {
-        legacyArgs = args + " --return " + quoteArgument(mainNro);
-    }
+    // 统一约定：桌面转发器只传 ROM + --exit-to-home，所有平台都从桌面图标退出回 HOME。
+    // NPDM 参数保持默认（36-bit / 3 核），后续新核心接入时再按约定调整。
+    const std::string args = quoteArgument(entry.path) + " --exit-to-home";
 
     const Result rc = sphaira::installForwarder(
-        nroPath, args, entry.title, "GBAStation", icon, legacyArgs);
+        nroPath, args, entry.title, "GBAStation", icon);
     if (R_FAILED(rc))
     {
         char buffer[96]{};

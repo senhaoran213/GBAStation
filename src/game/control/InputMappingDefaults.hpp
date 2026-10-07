@@ -83,7 +83,15 @@ namespace beiklive::input_mapping
         {"hotkey.pointer_mode.pad", "指针模式切换", "none", false},
         {"hotkey.pointer_click.pad", "指针点击", "none", false},
         {"hotkey.swap_screens.pad", "交换上下屏", "none", false, false},
-        {"hotkey.mic_input.pad", "模拟麦克风输入", "none", false},
+    };
+
+    // These are exclusive to the NDS host.  Unlike a physical microphone,
+    // NDS cores accept a transient white-noise feed while the mapping is held.
+    // All three are only meaningful with the DraStic external core.
+    inline constexpr HotkeyDefault kNdsSpecialHotkeys[] = {
+        {"hotkey.mic_input.pad", "模拟麦克风输入（仅 DraStic）", "PAD_LT+PAD_Y", false},
+        {"hotkey.mic_toggle.pad", "麦克风开关（仅 DraStic）", "none", false},
+        {"hotkey.mic_source.pad", "切换麦克风来源（仅 DraStic）", "none", false},
     };
 
     inline constexpr const char* kTurboAKey = "handle.a_turbo";
@@ -115,12 +123,44 @@ namespace beiklive::input_mapping
                    std::string(entry.key) != "hotkey.pause.pad";
         }
 
+        // The Saturn core implements two hotkeys: fast forward and the in-game
+        // menu.  Quick save/load, rewind, screenshot, mute and pause are not part
+        // of it -- save states are handled by the in-game menu's slot panels, so
+        // these rows would bind a key the core never reads.
+        if (prefix == "saturn.")
+        {
+            const std::string key(entry.key);
+            return key == "handle.fastforward" ||
+                   key == "hotkey.menu.pad";
+        }
+
+        return true;
+    }
+
+    // Rows that must not appear for a platform's core:
+    //   saturn select -- the Saturn pad has no Select button and the core's pad
+    //                    table has no entry for it, so the row would bind nothing;
+    //   saturn l2/r2  -- with the one-to-one mapping ZL/ZR now carry Saturn Z/C,
+    //                    and the core's L/R bindings read saturn.handle.l/r only,
+    //                    so these two rows would fight over the same buttons.
+    inline bool showsGameButtonForPrefix(const std::string& prefix,
+                                         const GameButtonDefault& entry)
+    {
+        if (prefix == "saturn.")
+        {
+            const std::string suffix(entry.suffix);
+            if (suffix == "select" || suffix == "l2" || suffix == "r2")
+                return false;
+        }
         return true;
     }
 
     inline bool showsTurboBindingsForPrefix(const std::string& prefix)
     {
-        return prefix != "arcade." && prefix != "dc." && prefix != "psp.";
+        // The Saturn core has no auto-fire; only the platforms whose cores read
+        // <prefix>.handle.a_turbo / b_turbo may show these rows.
+        return prefix != "arcade." && prefix != "dc." && prefix != "psp." &&
+               prefix != "saturn.";
     }
 
     inline bool usesLegacyGbFamilyFallback(const std::string& prefix)
@@ -291,14 +331,18 @@ namespace beiklive::input_mapping
     {
         if (prefix == "saturn.")
         {
-            if (suffix == "a") return "PAD_B";
-            if (suffix == "b") return "PAD_A";
-            if (suffix == "c") return "PAD_X";
-            if (suffix == "x") return "PAD_Y";
-            if (suffix == "y") return "PAD_LB";
-            if (suffix == "z") return "PAD_RB";
-            if (suffix == "l") return "PAD_LT";
-            if (suffix == "r") return "PAD_RT";
+            // One-to-one with the Switch pad: the same-named button drives the
+            // same-named Saturn button (A = PAD_A, L = PAD_LB, ...).  C and Z have
+            // no same-named Switch button, so they take the two spare triggers.
+            if (suffix == "a") return "PAD_A";
+            if (suffix == "b") return "PAD_B";
+            if (suffix == "c") return "PAD_RT";  // ZR
+            if (suffix == "x") return "PAD_X";
+            if (suffix == "y") return "PAD_Y";
+            if (suffix == "z") return "PAD_LT";  // ZL
+            if (suffix == "l") return "PAD_LB";
+            if (suffix == "r") return "PAD_RB";
+            if (suffix == "start") return "PAD_START";
         }
         if (requiresExplicitRightStickMapping(prefix) && isRightStickMapping(suffix))
             return "none";

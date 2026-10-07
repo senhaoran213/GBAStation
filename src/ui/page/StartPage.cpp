@@ -8,7 +8,6 @@
 #include "core/rom/PspMeta.hpp"
 #include "core/ThreadPool.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
-#include "core/ExternalCoreSession.hpp"
 #include "core/forwarder/ForwarderInstaller.hpp"
 #include "ui/utils/MaterialIcons.hpp"
 #include "ui/utils/NdsEnvironment.hpp"
@@ -932,6 +931,9 @@ beiklive::enums::FileType platformToFileType(int platform)
         bool shouldUseNdsExternalNro(const beiklive::GameEntry& entry)
         {
 #ifdef __SWITCH__
+            // Every NDS core is shipped as the same external NRO filename
+            // (GBAStationNDSStub.nro); the selected core only decides which
+            // settings page is shown.  Never branch on the core id here.
             return entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS);
 #else
             (void)entry;
@@ -1017,6 +1019,39 @@ beiklive::enums::FileType platformToFileType(int platform)
         bool shouldUseDolphinExternalNro(const beiklive::DirListData& dirItem)
         {
             return dirItem.itemType == beiklive::enums::FileType::DOLPHIN_ROM;
+        }
+
+        std::optional<beiklive::GameEntry> findGameDbEntryIgnoringExtension(
+            const std::string& path, int platform = -1)
+        {
+            if (!beiklive::GameDB)
+                return std::nullopt;
+
+            if (auto exact = beiklive::GameDB->findByPath(path))
+                return exact;
+
+            std::string stem = beiklive::tools::getFileNameWithoutExtension(
+                std::filesystem::path(path).filename().string());
+            std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (stem.empty())
+                return std::nullopt;
+
+            for (const auto& entry : beiklive::GameDB->getAll())
+            {
+                if (platform >= 0 && entry.platform != platform)
+                    continue;
+                std::string entryStem = beiklive::tools::getFileNameWithoutExtension(
+                    std::filesystem::path(entry.path).filename().string());
+                std::transform(entryStem.begin(), entryStem.end(), entryStem.begin(),
+                               [](unsigned char c) {
+                                   return static_cast<char>(std::tolower(c));
+                               });
+                if (entryStem == stem)
+                    return entry;
+            }
+            return std::nullopt;
         }
 
         [[maybe_unused]] bool exportThreeDsCoreConfig()
@@ -1106,11 +1141,11 @@ beiklive::enums::FileType platformToFileType(int platform)
             if (!beiklive::GameDB || dirItem.fullPath.empty())
                 return;
 
-            auto entryOpt = beiklive::GameDB->findByPath(dirItem.fullPath);
+            const int platform = static_cast<int>(dirItem.itemType);
+            auto entryOpt = findGameDbEntryIgnoringExtension(dirItem.fullPath, platform);
             beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
             bool changed = !entryOpt.has_value();
 
-            const int platform = static_cast<int>(dirItem.itemType);
             const std::string stem = beiklive::tools::getFileNameWithoutExtension(dirItem.fileName);
 
             if (entry.path.empty()) {
@@ -1133,6 +1168,20 @@ beiklive::enums::FileType platformToFileType(int platform)
             if (entry.savePath.empty()) {
                 entry.savePath = beiklive::tools::defaultGameSavePath(entry.platform, entry.path);
                 changed = true;
+            }
+            if (beiklive::tools::getFileExtension(entry.path) == "zip" ||
+                beiklive::tools::getFileExtension(entry.path) == "7z")
+            {
+                // 压缩包只能写入能直接运行它的机种（内置解压平台 + Arcade/FBNeo）。
+                // 候选列表来自 candidatePlatformsForExtension，保持单一事实来源。
+                const std::vector<int> archivePlatforms =
+                    beiklive::tools::candidatePlatformsForExtension("zip");
+                if (std::find(archivePlatforms.begin(), archivePlatforms.end(),
+                              entry.platform) == archivePlatforms.end())
+                {
+                    brls::Application::notify(L("该压缩包平台暂不支持内置运行"));
+                    return;
+                }
             }
             if (entry.logoPath.empty()) {
                 entry.logoPath = beiklive::tools::getDefaultLogoPath(
@@ -1199,7 +1248,10 @@ beiklive::enums::FileType platformToFileType(int platform)
 #ifdef __SWITCH__
         bool launchNdsExternalNro(const std::string& romPath, const std::string& title)
         {
-            const std::string nroPath = GET_SETTING_KEY_STR("nds.externalNro.path", "/GBAStation/core/GBAStationNDSStub.nro");
+            /* The host only reads the launcher's persisted config.cfg.  The
+             * launcher retains ownership of saving it during its normal exit
+             * path, rather than writing global settings on every game launch. */
+            const std::string nroPath = "/GBAStation/core/GBAStationNDSStub.nro";
             const std::string returnPath = GET_SETTING_KEY_STR("nds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
 
             auto result = beiklive::switch_platform::launchNroOnExit({nroPath, romPath, returnPath});
@@ -1211,6 +1263,7 @@ beiklive::enums::FileType platformToFileType(int platform)
             }
 
             brls::Logger::info("NDS external NRO configured for {}: {}", title, result.message);
+            VideoBackgroundView::setSharedAudioSuspended(true);
             brls::Application::notify(L("正在启动NDS独立NRO..."));
             brls::sync([]() { brls::Application::quit(); });
             return true;
@@ -1234,6 +1287,7 @@ beiklive::enums::FileType platformToFileType(int platform)
             }
 
             brls::Logger::info("3DS external NRO configured for {}: {}", title, result.message);
+            VideoBackgroundView::setSharedAudioSuspended(true);
             brls::Application::notify(L("正在启动3DS独立NRO..."));
             brls::sync([]() { brls::Application::quit(); });
             return true;
@@ -1268,13 +1322,10 @@ beiklive::enums::FileType platformToFileType(int platform)
 
             const std::string nroPath = GET_SETTING_KEY_STR(pathKey, defaultPath);
             const std::string returnPath = GET_SETTING_KEY_STR(returnKey, "sdmc:/switch/GBAStation.nro");
-			const std::string sessionToken = beiklive::makeExternalCoreSessionToken(romPath);
-
 			beiklive::switch_platform::NroLaunchRequest request;
 			request.nroPath = nroPath;
 			request.romPath = romPath;
 			request.returnNroPath = returnPath;
-			request.extraArgs = {"--gbastation-session", sessionToken};
 			auto result = beiklive::switch_platform::launchNroOnExit(request);
             if (!result.success)
             {
@@ -1283,10 +1334,8 @@ beiklive::enums::FileType platformToFileType(int platform)
                 return false;
             }
 
-			if (!beiklive::beginExternalCoreSession(romPath, platform, sessionToken))
-				brls::Logger::error("{} external session tracking could not start for {}", label, romPath);
-
             brls::Logger::info("{} external NRO configured for {}: {}", label, title, result.message);
+            VideoBackgroundView::setSharedAudioSuspended(true);
             brls::Application::notify(L("正在启动") + label + L("独立NRO..."));
             brls::sync([]() { brls::Application::quit(); });
             return true;
@@ -1509,8 +1558,8 @@ beiklive::enums::FileType platformToFileType(int platform)
 #ifdef __SWITCH__
             return launchExternalCoreNro(entry.path, entry.title, "PS1",
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
-                "ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
-                "ps1.externalNro.returnPath");
+                "core.ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
+                "core.ps1.externalNro.returnPath");
 #else
             brls::Application::notify(L("PS1 独立运行时仅支持 Switch"));
             return false;
@@ -1632,8 +1681,8 @@ void StartPage::_launchDirItem(const beiklive::DirListData& dirItem, beiklive::B
 #ifdef __SWITCH__
             launchExternalCoreNro(dirItem.fullPath, dirItem.fileName, "PS1",
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
-                "ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
-                "ps1.externalNro.returnPath");
+                "core.ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
+                "core.ps1.externalNro.returnPath");
             return;
 #else
             brls::Application::notify(L("PS1 独立运行时仅支持 Switch"));
@@ -1802,9 +1851,11 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
             brls::Logger::info("Exit requested");
             if (switchLayout) {
                 switchLayout->playExitAnimation([]() {
+                    VideoBackgroundView::setSharedAudioSuspended(true);
                     brls::Application::quit();
                 });
             } else {
+                VideoBackgroundView::setSharedAudioSuspended(true);
                 brls::Application::quit();
             }
         };
@@ -1904,9 +1955,11 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
             brls::Logger::info("Exit requested");
             if (iisuLayout) {
                 iisuLayout->playExitAnimation([]() {
+                    VideoBackgroundView::setSharedAudioSuspended(true);
                     brls::Application::quit();
                 });
             } else {
+                VideoBackgroundView::setSharedAudioSuspended(true);
                 brls::Application::quit();
             }
         };
@@ -2024,7 +2077,7 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
 
                 return true;
             });
-        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "nes", "fds", "sfc", "smc", "nds", "cia", "cci", "3ds", "md", "gen", "bin", "smd", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "cso", "pbp", "zip", "7z", "png"});
+        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "nes", "fds", "sfc", "smc", "nds", "cia", "cci", "3ds", "md", "gen", "bin", "smd", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "cso", "pbp", "img", "ecm", "mds", "m3u", "ccd", "gcm", "rvz", "wbfs", "wad", "ciso", "tgc", "gcz", "wia", "nfs", "dol", "elf", "zip", "7z", "png"});
 
         m_fileListPage->onFileSelected = [this](beiklive::DirListData dirItem)
         {
@@ -2054,6 +2107,9 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
             case beiklive::enums::FileType::ARCADE_ROM:
             case beiklive::enums::FileType::DREAMCAST_ROM:
             case beiklive::enums::FileType::PSP_ROM:
+            case beiklive::enums::FileType::PS1_ROM:
+            case beiklive::enums::FileType::SATURN_ROM:
+            case beiklive::enums::FileType::DOLPHIN_ROM:
                 brls::Application::notify(L("启动游戏：") + dirItem.fileName);
                 _pushGameActivity(dirItem, this);
                 break;
